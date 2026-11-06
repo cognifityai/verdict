@@ -1,3 +1,4 @@
+import asyncio
 import builtins
 import importlib.util
 import json
@@ -19,6 +20,7 @@ from verdict.agent_judgment import (
     agent_turn_judgment_to_json,
     turn_evidence_fingerprint,
 )
+from verdict.dashboard.app import create_app
 from verdict.dashboard.evaluator_lab import (
     _IdentityOnlyProvider,
     _provider,
@@ -39,11 +41,12 @@ from verdict.evidence import (
     PrivacyClassification,
     SourceSession,
 )
+from verdict.pricing import compute_cost_usd
 from verdict.schema import DimensionScore, Judgment, JudgmentStatus, Trace, Verdict
 from verdict.storage import InMemoryStorage
 from verdict.storage.postgres import PostgresStorage
 from verdict.storage.sqlite import SQLiteStorage
-from verdict_eval.providers import AnthropicAdapter, CompletionResponse
+from verdict_eval.providers import AnthropicAdapter, CompletionResponse, output_token_ceiling
 
 
 def test_evaluator_environment_reports_openai_compatible_endpoint_without_value(
@@ -164,6 +167,74 @@ def _agent_turn_bundle(*, tenant="local"):
             response_state=EvidenceState.PRESENT,
         ),),
     )
+
+
+@pytest.mark.parametrize("unit", ["trace", "agent_turn"])
+def test_dashboard_evaluator_run_requires_static_spend_limit_before_egress(tmp_path, monkeypatch, unit):
+    path = tmp_path / f"{unit}-spend.db"
+    storage = SQLiteStorage(str(path))
+    if unit == "trace":
+        storage.insert_trace(_trace("trace-spend"))
+    else:
+        storage.replace_agent_run_bundle(_agent_turn_bundle())
+    storage.close()
+    provider = CountingProvider()
+    monkeypatch.setattr("verdict.dashboard.evaluator_lab._provider", lambda _name: provider)
+    config = {**_config(), "model": "claude-haiku-4-5", "unit": unit, "maxCalls": 1}
+    app = create_app(storage=f"sqlite:///{path}", tenant_id="local")
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview_response = await client.post("/api/evaluators/preview", json=config, headers=headers)
+            assert preview_response.status_code == 200
+            preview = preview_response.json()
+            assert preview["plannedCalls"] == 1
+            approved = {**config, "planFingerprint": preview["planFingerprint"],
+                        "plannedTurns" if unit == "agent_turn" else "plannedTraces":
+                            preview["plannedTurns" if unit == "agent_turn" else "plannedTraces"],
+                        "confirmExternalEgress": True}
+            missing = await client.post("/api/evaluators/run", json=approved, headers=headers)
+            assert missing.status_code == 400
+            assert provider.calls == 0
+            bound = preview["upperStaticListPriceUsd"]
+            for invalid in (bound / 2, 0, -1, True, "1", 101, 10**400, -(10**400)):
+                low = await client.post("/api/evaluators/run",
+                                        json={**approved, "maxEstimatedUsd": invalid}, headers=headers)
+                assert low.status_code == 400
+            unknown_config = {**config, "model": "synthetic-unpriced-model"}
+            unknown_preview = (await client.post("/api/evaluators/preview",
+                                                 json=unknown_config, headers=headers)).json()
+            assert unknown_preview["upperStaticListPriceUsd"] is None
+            unknown = await client.post("/api/evaluators/run", json={
+                **unknown_config, "planFingerprint": unknown_preview["planFingerprint"],
+                "plannedTurns" if unit == "agent_turn" else "plannedTraces":
+                    unknown_preview["plannedTurns" if unit == "agent_turn" else "plannedTraces"],
+                "maxEstimatedUsd": 1, "confirmExternalEgress": True}, headers=headers)
+            assert unknown.status_code == 400
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://synthetic-judge.invalid/v1")
+            custom_preview = (await client.post("/api/evaluators/preview",
+                                                json=config, headers=headers)).json()
+            assert custom_preview["upperStaticListPriceUsd"] is None
+            custom = await client.post("/api/evaluators/run", json={
+                **approved, "planFingerprint": custom_preview["planFingerprint"],
+                "maxEstimatedUsd": 1}, headers=headers)
+            assert custom.status_code == 400
+            assert provider.calls == 0
+            monkeypatch.delenv("ANTHROPIC_BASE_URL")
+            exact = await client.post("/api/evaluators/run",
+                                      json={**approved, "maxEstimatedUsd": bound}, headers=headers)
+            assert exact.status_code == 200
+            assert provider.calls == 1
+            request = provider.requests[0]
+            input_bound = sum(len(message["content"].encode("utf-8"))
+                              for message in request.messages) + 1_024
+            assert bound == compute_cost_usd(config["model"], input_bound,
+                                             output_token_ceiling(request.max_tokens, config["model"]))
+
+    asyncio.run(exercise())
 
 
 def _stored_turn_result(storage, fingerprint):
@@ -1936,6 +2007,76 @@ def test_customer_label_set_can_be_previewed_and_calibrated(tmp_path):
     [health] = storage.list_evaluator_health(limit=10)
     assert health.sentinel_set_name == "customer-v1"
     assert health.tenant_id == "__verdict_local__"
+
+
+def test_dashboard_calibration_requires_static_spend_limit_before_egress(tmp_path, monkeypatch):
+    label_set = tmp_path / "synthetic-labels.jsonl"
+    label_set.write_text(
+        '{"set_name":"synthetic-v1"}\n'
+        '{"sentinel_id":"one","query":"Synthetic question","response":"Synthetic answer",'
+        '"labels":{"relevance":"pass","completeness":"pass"}}\n'
+    )
+    provider = CountingProvider()
+    monkeypatch.setattr("verdict.dashboard.evaluator_lab._provider", lambda _name: provider)
+    app = create_app(storage=f"sqlite:///{tmp_path / 'calibration-spend.db'}", tenant_id="local")
+    config = {**_config(), "labelSetPath": str(label_set)}
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview_response = await client.post("/api/evaluators/calibration/preview",
+                                                 json=config, headers=headers)
+            assert preview_response.status_code == 200
+            preview = preview_response.json()
+            approved = {**config, "planFingerprint": preview["planFingerprint"],
+                        "confirmExternalEgress": True, "minimumExamples": 1}
+            missing = await client.post("/api/evaluators/calibration/run",
+                                        json=approved, headers=headers)
+            assert missing.status_code == 400
+            assert provider.calls == 0
+            bound = preview["upperStaticListPriceUsd"]
+            low = await client.post("/api/evaluators/calibration/run",
+                                    json={**approved, "maxEstimatedUsd": bound / 2}, headers=headers)
+            assert low.status_code == 400
+            assert provider.calls == 0
+            exact = await client.post("/api/evaluators/calibration/run",
+                                      json={**approved, "maxEstimatedUsd": bound}, headers=headers)
+            assert exact.status_code == 200
+            assert provider.calls == 1
+            request = provider.requests[0]
+            input_bound = sum(len(message["content"].encode("utf-8"))
+                              for message in request.messages) + 1_024
+            assert bound == compute_cost_usd(
+                config["model"], input_bound,
+                output_token_ceiling(request.max_tokens, config["model"]),
+            )
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://synthetic-judge.example")
+            custom_preview = await client.post("/api/evaluators/calibration/preview",
+                                               json=config, headers=headers)
+            assert custom_preview.status_code == 200
+            assert custom_preview.json()["upperStaticListPriceUsd"] is None
+            custom = await client.post("/api/evaluators/calibration/run",
+                                       json={**approved, "planFingerprint":
+                                             custom_preview.json()["planFingerprint"],
+                                             "maxEstimatedUsd": 100.0}, headers=headers)
+            assert custom.status_code == 400
+            assert provider.calls == 1
+            monkeypatch.delenv("ANTHROPIC_BASE_URL")
+            derivative = await client.post("/api/evaluators/calibration/preview",
+                                           json={**config, "model": "custom-claude-haiku-4-5-private"},
+                                           headers=headers)
+            assert derivative.status_code == 200
+            assert derivative.json()["upperStaticListPriceUsd"] is None
+            derivative_run = await client.post("/api/evaluators/calibration/run",
+                                               json={**approved, "model": "custom-claude-haiku-4-5-private",
+                                                     "planFingerprint": derivative.json()["planFingerprint"],
+                                                     "maxEstimatedUsd": 100.0}, headers=headers)
+            assert derivative_run.status_code == 400
+            assert provider.calls == 1
+
+    asyncio.run(exercise())
 
 
 def test_shared_calibration_identity_matches_production_judgment(tmp_path):

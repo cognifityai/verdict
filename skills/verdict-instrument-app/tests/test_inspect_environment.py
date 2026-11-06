@@ -119,22 +119,25 @@ def test_b2_environment_requires_synchronized_upgrade(monkeypatch: pytest.Monkey
     assert report["action"] == "upgrade"
 
 
-def test_b3_environment_requires_synchronized_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
-    report = inspect(monkeypatch, synchronized("0.1.0b3"))
+@pytest.mark.parametrize("version", ["0.1.0b3", "0.1.0b4", "0.1.0b5"])
+def test_previous_beta_environment_requires_synchronized_upgrade(
+    monkeypatch: pytest.MonkeyPatch, version: str,
+) -> None:
+    report = inspect(monkeypatch, synchronized(version))
 
     assert report["state"] == "upgrade"
     assert report["action"] == "upgrade"
 
 
-def test_b4_environment_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
-    report = inspect(monkeypatch, synchronized("0.1.0b5"))
+def test_b6_environment_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    report = inspect(monkeypatch, synchronized("0.1.0b6"))
 
     assert report["state"] == "current"
     assert report["action"] == "none"
 
 
 def test_mixed_versions_fail_closed_to_repair(monkeypatch: pytest.MonkeyPatch) -> None:
-    versions = synchronized("0.1.0b5")
+    versions = synchronized("0.1.0b6")
     versions["cognifity-verdict-eval"] = Distribution("0.1.0a5")
 
     report = inspect(monkeypatch, versions)
@@ -146,7 +149,7 @@ def test_mixed_versions_fail_closed_to_repair(monkeypatch: pytest.MonkeyPatch) -
 def test_unrelated_verdict_distribution_is_a_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    versions = synchronized("0.1.0b5")
+    versions = synchronized("0.1.0b6")
     versions["verdict"] = Distribution("1.0.0")
 
     report = inspect(monkeypatch, versions)
@@ -169,7 +172,7 @@ def test_storage_report_exposes_backend_but_never_secret(
     storage: str,
     backend: str,
 ) -> None:
-    report = inspect(monkeypatch, synchronized("0.1.0b5"), storage=storage)
+    report = inspect(monkeypatch, synchronized("0.1.0b6"), storage=storage)
 
     assert report["storage_backend"] == backend
     assert "secret" not in json.dumps(report)

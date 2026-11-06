@@ -6,8 +6,10 @@ adapter but not the other, the Protocol is leaking implementation details.
 from __future__ import annotations
 
 import inspect
+import os
 import sqlite3
 import threading
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -57,6 +59,49 @@ def _trace(**overrides):
     )
     base.update(overrides)
     return Trace(**base)
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite", "postgres"])
+@pytest.mark.parametrize("fingerprint", [None, "a" * 64])
+def test_judgment_evidence_binding_survives_reads_and_resave(tmp_path, backend, fingerprint):
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+
+            dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                            allow_any_database=False)
+            if dsn is None:
+                pytest.skip(reason)
+            adapter = PostgresStorage(stack.enter_context(isolated_test_dsn(dsn)))
+        elif backend == "sqlite":
+            adapter = SQLiteStorage(str(tmp_path / "binding.db"))
+        else:
+            adapter = InMemoryStorage()
+        stack.callback(adapter.close)
+        trace = _trace()
+        adapter.insert_trace(trace)
+        judgment = Judgment(
+            trace_id=trace.trace_id, evaluator_fingerprint="b" * 64,
+            evaluator_provider="synthetic", judge_models=["synthetic-judge"],
+            expected_dimensions=["quality"],
+            dimensions=[DimensionScore("quality", Verdict.PASS)],
+            evaluated_trace_fingerprint=fingerprint,
+        )
+        adapter.insert_judgment(judgment)
+        readers = (
+            lambda: adapter.list_judgments_for_trace(trace.trace_id),
+            lambda: adapter.list_judgments_for_cluster(trace.cluster_id),
+            lambda: adapter.list_latest_judgments_for_evaluator(
+                trace.tenant_id, judgment.evaluator_fingerprint,
+            ),
+        )
+        for read in readers:
+            [saved] = read()
+            assert saved.evaluated_trace_fingerprint == fingerprint
+        adapter.insert_judgment(readers[0]()[0])
+        for read in readers:
+            [saved] = read()
+            assert saved.evaluated_trace_fingerprint == fingerprint
 
 
 def test_span_identity_cannot_be_reassigned_to_another_tenant(storage):
@@ -1512,7 +1557,7 @@ def test_postgres_judgment_query_uses_fixed_columns_and_maps_them_in_order():
         ["judge-a"],
         [{"name": "quality", "verdict": "pass", "reasoning": "ok", "judge_model": "judge-a"}],
         True, "openai", {"model": "judge-a"}, "fp-1", ["quality"],
-        "completed", None,
+        "completed", None, "a" * 64,
     )
 
     def fetchall(sql, params):
@@ -1529,6 +1574,7 @@ def test_postgres_judgment_query_uses_fixed_columns_and_maps_them_in_order():
     assert judgment.judgment_id == "judgment-1"
     assert judgment.position_swap_consistent is True
     assert judgment.evaluator_fingerprint == "fp-1"
+    assert judgment.evaluated_trace_fingerprint == "a" * 64
     assert judgment.dimensions[0].verdict is Verdict.PASS
 
 

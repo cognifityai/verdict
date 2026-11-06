@@ -27,7 +27,7 @@ const issueNextCheck = (issue) => {
 const ANALYSIS_LABELS = {
   tool_error: "Tool failures recorded", command_failed: "Commands failed",
   test_failed: "Test failures recorded", business_outcome_failed: "Reported business outcomes failed",
-  possible_tool_loop: "Repeated identical tool calls", required_step_missing: "Required evidence missing",
+  possible_tool_loop: "Earlier repeated-call heuristic", required_step_missing: "Required evidence missing",
   prohibited_tool_used: "Prohibited tool used", response_schema_invalid: "Responses failed the JSON requirement",
 };
 const displayTime = (value) => {
@@ -42,8 +42,6 @@ function RecheckEvidence({ issue, token, root, onOpenEvidence, onRefresh }) {
   const [error, setError] = useState(null);
   const [search, setSearch] = useState(null);
   const searchGeneration = useRef(0);
-  const attachDetails = useRef(null);
-  const runInput = useRef(null);
   const rechecks = Array.isArray(issue.rechecks) ? issue.rechecks : [];
   const currentSearch = search?.noticeId === issue.noticeId ? search : null;
   const canSearch = ["command_failed", "test_failed"].includes(issue.checkCode);
@@ -66,16 +64,15 @@ function RecheckEvidence({ issue, token, root, onOpenEvidence, onRefresh }) {
     }
   }
 
-  async function attach(event) {
-    event.preventDefault();
-    if (!token || busy || !runId.trim() || !eventId.trim()) return;
+  async function attachRecorded(selectedRunId, selectedEventId) {
+    if (!token || busy || !selectedRunId || !selectedEventId) return;
     setBusy(true);
     setError(null);
     try {
       const response = await fetch(`${root}/api/control/issues/${encodeURIComponent(issue.noticeId)}/rechecks`, {
         method: "POST", credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-Verdict-Setup": token },
-        body: JSON.stringify({ runId: runId.trim(), eventId: eventId.trim() }),
+        body: JSON.stringify({ runId: selectedRunId, eventId: selectedEventId }),
       });
       if (!response.ok) throw new Error("The selected event was not a later explicit pass for this issue.");
       setRunId("");
@@ -87,6 +84,11 @@ function RecheckEvidence({ issue, token, root, onOpenEvidence, onRefresh }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function attach(event) {
+    event.preventDefault();
+    await attachRecorded(runId.trim(), eventId.trim());
   }
 
   return <div className="text-sm mt-3 space-y-2">
@@ -123,19 +125,15 @@ function RecheckEvidence({ issue, token, root, onOpenEvidence, onRefresh }) {
                   ...(candidate.recentRevision ? { recentRevision: candidate.recentRevision,
                     recentTurnId: candidate.recentTurnId } : {}) })}>Inspect candidate →</button>
               <button type="button" className="underline" style={{ color: COLORS.green }}
-                onClick={() => {
-                  setRunId(candidate.runId);
-                  setEventId(candidate.eventId);
-                  if (attachDetails.current) attachDetails.current.open = true;
-                  runInput.current?.focus();
-                }}>Use these IDs</button>
+                disabled={!token || busy}
+                onClick={() => attachRecorded(candidate.runId, candidate.eventId)}>Attach this recorded pass</button>
             </div>)}
           </>}
       </>}
     </div>}
-    <details ref={attachDetails}><summary className="cursor-pointer" style={{ color: COLORS.green }}>Attach a later recorded pass</summary>
+    <details><summary className="cursor-pointer" style={{ color: COLORS.green }}>Attach a later recorded pass</summary>
       <form onSubmit={attach} className="mt-2 flex flex-wrap gap-2 items-end">
-        <label>Later run ID<input ref={runInput} className="block border px-2 py-1 bg-transparent" style={{ borderColor: COLORS.border }}
+        <label>Later run ID<input className="block border px-2 py-1 bg-transparent" style={{ borderColor: COLORS.border }}
           value={runId} onChange={(event) => setRunId(event.target.value)} /></label>
         <label>Later event ID<input className="block border px-2 py-1 bg-transparent" style={{ borderColor: COLORS.border }}
           value={eventId} onChange={(event) => setEventId(event.target.value)} /></label>
@@ -271,9 +269,9 @@ export function IssueInbox({ configUrl, insightsUrl = null, meta = {}, monitor =
     && item.documentId === "daily" && item.state === "active");
   const nextCheck = expectedNextCheck(savedPlan, readiness);
   const status = monitoringStatus(monitor, readiness);
-  const currentCheck = workerRecent && readiness?.lastCycle?.trigger === "worker"
-    && readiness.lastCycle.scheduleRevision === savedPlan?.revision
-    && readiness.lastCycle.state === "completed";
+  const currentCheck = workerRecent && Number.isInteger(savedPlan?.revision)
+    && readiness?.lastWorkerCycle?.state === "completed"
+    && readiness.lastWorkerCycle.scheduleRevision === savedPlan?.revision;
   const activeComparison = monitor?.active?.snapshot;
   const collecting = activeComparison?.manifest?.prospective_open === true;
   const alertCount = collecting ? 0 : (activeComparison?.comparison?.metrics || [])
@@ -332,7 +330,8 @@ export function IssueInbox({ configUrl, insightsUrl = null, meta = {}, monitor =
       <div><div className="text-xs font-mono" style={{ color: workerRecent ? COLORS.green : COLORS.amber }}>{leadFinding ? "RECORDED ISSUE TO REVIEW" : status.id === "alert" ? "MODEL-CALL ALERT" : schedulePaused ? "PLAN PAUSED" : status.id === "collecting" ? "MODEL-CALL MONITOR COLLECTING" : currentCheck ? "AGENT CHECKS VERIFIED" : workerRecent ? "WORKER WAITING FOR THIS PLAN" : scheduleActive ? "PLAN SAVED · WORKER NOT VERIFIED" : "NO RECURRING PLAN"}</div>
         <h3 className="font-semibold mt-2">{leadFinding ? ANALYSIS_LABELS[actionable.code] || actionable.code.replaceAll("_", " ") : currentCheck && status.id === "worker_recent" ? "Latest scheduled check completed" : status.title}</h3><p className="text-sm mt-1" style={{ color: COLORS.sub }}>{leadFinding ? `Saved analysis found ${affectedRunLabel} across ${Number(snapshot.scope?.analyzedRuns || 0).toLocaleString()} of ${Number(snapshot.scope?.availableRuns || 0).toLocaleString()} runs. Inspect the recorded events, then decide what to change.` : currentCheck && status.id === "worker_recent" ? "The worker completed a check on this plan. Review recorded issues and the next eligible check below." : status.description}</p>
         {leadFinding && snapshot.analysisState?.completedAt && <p className="text-xs mt-2" style={{ color: COLORS.sub }}>Analysis completed: {displayTime(snapshot.analysisState.completedAt)}{snapshot.analysisState.cutoff ? ` · started: ${displayTime(snapshot.analysisState.cutoff)}` : ""}</p>}</div>
-      <button type="button" onClick={leadFinding ? () => onOpenFinding?.(actionable) : onOpenPlan} className="border px-3 py-2 text-sm" style={{ borderColor: COLORS.border, color: COLORS.green }}>{leadFinding ? "Inspect affected runs" : schedulePaused ? "Review and resume" : scheduleActive ? "Change checks" : "Review suggested plan"}</button>
+      <div className="flex flex-wrap gap-2"><button type="button" onClick={leadFinding ? () => onOpenFinding?.(actionable) : onOpenPlan} className="border px-3 py-2 text-sm" style={{ borderColor: COLORS.border, color: COLORS.green }}>{leadFinding ? "Inspect affected runs" : schedulePaused ? "Review and resume" : scheduleActive ? "Change checks" : "Review suggested plan"}</button>
+        {leadFinding && <button type="button" onClick={onOpenPlan} className="text-sm underline" style={{ color: COLORS.sub }}>{scheduleActive || schedulePaused ? "Review current plan" : "Start recurring checks"}</button>}</div>
     </section>
     <div className="grid sm:grid-cols-3 gap-3 text-sm" aria-label="Monitoring at a glance">
       <div className="border p-4" style={{ background: COLORS.panel, borderColor: COLORS.border }}><div style={{ color: COLORS.sub }}>Captured agent runs</div><div className="text-xl font-semibold mt-1">{Number(meta.totalAgentRuns || 0).toLocaleString()}</div><div className="text-xs mt-1" style={{ color: COLORS.sub }}>Stored evidence at the last dashboard refresh</div></div>
@@ -342,7 +341,12 @@ export function IssueInbox({ configUrl, insightsUrl = null, meta = {}, monitor =
     {!leadNotice && (leadFinding || alertCount > 0) && <div><h2 className="text-lg font-semibold">Needs your attention</h2><p className="text-sm mt-1" style={{ color: COLORS.sub }}>Open the evidence, then choose the next action.</p></div>}
     {readiness?.lastCycle?.state === "failed" && <p role="alert" className="border p-3 text-sm" style={{ borderColor: COLORS.amber, color: COLORS.amber }}>Latest {readiness.lastCycle.trigger} check failed: {String(readiness.lastCycle.failureCode || "cycle error").replaceAll("_", " ")}. Review the plan and rerun.</p>}
     {readiness?.lastCycle?.state === "started" && <p role="status" className="border p-3 text-sm" style={{ borderColor: COLORS.amber, color: COLORS.amber }}>A check started {displayTime(readiness.lastCycle.startedAt)}, but completion was not recorded. Check the worker before relying on this watch.</p>}
-    {readiness?.lastCycle?.state === "completed" && <p className="text-sm" style={{ color: COLORS.sub }}>Latest completed {readiness.lastCycle.trigger} check: {displayTime(readiness.lastCycle.finishedAt)}. {readiness.lastCycle.trigger === "manual" ? "This does not prove the recurring worker ran." : "Open the plan to review its current revision and worker status."}</p>}
+    {readiness?.lastCycle?.state === "completed" && <p className="text-sm" style={{ color: COLORS.sub }}>{readiness.lastCycle.trigger === "worker" && !currentCheck ? "Previous worker check completed:" : `Latest completed ${readiness.lastCycle.trigger} check:`} {displayTime(readiness.lastCycle.finishedAt)}. {readiness.lastCycle.trigger === "manual" ? currentCheck ? "A separate worker check completed on this plan." : "This does not prove the recurring worker ran." : currentCheck ? "This check ran on the current plan revision." : "This does not verify a recurring check on the current plan; open the plan for its status."}</p>}
+    {currentCheck && readiness?.lastCycle?.trigger === "manual" && <p className="text-sm" style={{ color: COLORS.sub }}>Worker check on this plan completed: {displayTime(readiness.lastWorkerCycle.finishedAt)}.</p>}
+    {scheduleActive && Number.isInteger(savedPlan?.revision) && readiness?.lastCycle?.trigger === "manual"
+      && readiness?.lastWorkerCycle?.scheduleRevision === savedPlan?.revision
+      && ["failed", "started"].includes(readiness.lastWorkerCycle.state)
+      && <p role="alert" className="text-sm" style={{ color: COLORS.amber }}>Latest worker check on this plan {readiness.lastWorkerCycle.state === "failed" ? `failed: ${String(readiness.lastWorkerCycle.failureCode || "cycle error").replaceAll("_", " ")}` : "started but did not record completion"}. Review the plan and worker before relying on this watch.</p>}
     {!leadFinding && !leadNotice && <div><h3 className="text-lg font-semibold">Needs your attention</h3><p className="text-sm mt-1" style={{ color: COLORS.sub }}>{totalOpen ? "Open a recorded event, check the evidence, then choose the next action." : alertCount ? "Open the model-call comparison to inspect the changed metric and examples." : actionable ? "Inspect the linked runs in the saved analysis, then decide whether to start recurring checks." : analysis.loading ? "Loading saved findings before suggesting a next step." : snapshotStale ? "Refresh the saved analysis before interpreting issue status." : "No open recurring notices or completed comparison alert in this view. Review saved analysis coverage below."}</p></div>}
     {insightsUrl && !leadFinding && <section className="border p-4" style={{ background: COLORS.panel, borderColor: actionable ? COLORS.amber : COLORS.border }}>
       <div className="text-xs font-mono" style={{ color: COLORS.green }}>SAVED DETERMINISTIC ANALYSIS</div>

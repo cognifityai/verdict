@@ -40,6 +40,7 @@ from verdict.dashboard.analysis_service import (
     read_latest_analysis,
     run_analysis,
 )
+from verdict.dashboard.control_plane import ControlStore
 from verdict.dashboard.local_history_page import (
     complete_local_bundle,
     verified_local_positions,
@@ -152,8 +153,9 @@ _FINDING_SUMMARIES = {
     "tool_error": "One or more captured tool results reported failure.",
     "command_failed": "One or more captured commands returned a non-zero status.",
     "business_outcome_failed": "One or more explicit business outcomes reported failure.",
+    "negative_feedback_recorded": "One or more explicit thumbs-down ratings were recorded; their cause is unknown.",
     "possible_tool_loop": (
-        "Identical tool calls with identical arguments repeated within a turn past the configured threshold."
+        "An earlier analysis heuristic flagged repeated tool calls; redaction can make distinct arguments look alike. Review the recorded events."
     ),
     "required_step_missing": "A policy-required evidence type was not observed.",
     "prohibited_tool_used": "A policy-prohibited tool was called.",
@@ -896,6 +898,133 @@ def build_agent_session_bundle(
     return redacted
 
 
+def build_followup_review(
+    storage: str | os.PathLike[str], *, tenant: str, run_id: str, turn_id: str,
+) -> dict[str, Any]:
+    """Read one current text pair and its optional human label."""
+    if any(not isinstance(value, str) or not value or "\x00" in value
+           or len(value.encode("utf-8")) > 256
+           for value in (tenant, run_id, turn_id)):
+        raise ValueError("invalid follow-up selection")
+    configured = str(storage)
+    if _is_postgres(configured):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                pair = agent_evidence_queries.followup_pair(
+                    _PostgresSession(connection), tenant, run_id, turn_id,
+                )
+    else:
+        connection = sqlite3.connect(f"file:{_sqlite_path(configured)}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            pair = agent_evidence_queries.followup_pair(
+                _SQLiteSession(connection), tenant, run_id, turn_id,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    safe = redact_structure({key: value for key, value in pair.items()
+                             if key != "prior_turn_id"})
+    if not isinstance(safe, dict) or any(not isinstance(safe.get(key), str)
+                                            for key in ("prior_request", "prior_answer",
+                                                        "later_request")):
+        raise DashboardBundleLimitError("follow-up evidence unavailable")
+    fingerprint = _followup_fingerprint(run_id, turn_id, pair["prior_turn_id"], safe)
+    document_id = _followup_document_id(run_id, turn_id)
+    history = ControlStore(configured).history(tenant, "review", document_id)
+    saved = history[0] if history else None
+    payload = saved["payload"] if saved else None
+    labels = {"fail": "correction", "pass": "ordinary", "unclear": "unclear"}
+    current = isinstance(payload, dict) and saved["state"] == "resolved" and (
+        payload.get("reviewType") == "followup_correction_v1"
+        and payload.get("runId") == run_id
+        and payload.get("turnId") == turn_id
+        and payload.get("priorTurnId") == pair["prior_turn_id"]
+        and payload.get("evidenceFingerprint") == fingerprint
+        and isinstance(payload.get("label"), str)
+        and payload.get("label") in labels
+    )
+
+    return {
+        "eligible": True, "runId": run_id, "turnId": turn_id,
+        "priorTurnId": pair["prior_turn_id"],
+        "priorRequest": safe["prior_request"],
+        "priorAnswer": safe["prior_answer"],
+        "laterRequest": safe["later_request"],
+        "evidenceFingerprint": fingerprint,
+        "label": labels[payload["label"]] if current else None,
+        "stale": bool(saved and not current),
+        "revision": saved["revision"] if saved else None,
+        "documentId": document_id,
+    }
+
+
+def _followup_document_id(run_id: str, turn_id: str) -> str:
+    return "followup:" + hashlib.sha256(f"{run_id}\x00{turn_id}".encode()).hexdigest()
+
+
+def _followup_fingerprint(run_id: str, turn_id: str, prior_turn_id: str,
+                          safe: dict[str, str]) -> str:
+    return hashlib.sha256(json.dumps(
+        {"version": 1, "runId": run_id, "turnId": turn_id,
+         "priorTurnId": prior_turn_id, **safe},
+        sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def _followup_page_review_status(session: _QuerySession, tenant: str,
+                                 page: dict[str, Any]) -> None:
+    """Annotate only this snapshot's bounded candidates with current human labels."""
+    has_reviews = session.table_exists("product_control_documents")
+    for item in page["followups"]:
+        item["reviewStatus"] = "not_reviewed"
+        if not has_reviews:
+            continue
+        run_id, turn_id = item["runId"], item["turnId"]
+        row = session.execute(
+            """SELECT state,payload_json FROM product_control_documents
+               WHERE tenant_id=? AND kind='review' AND document_id=?
+               ORDER BY revision DESC LIMIT 1""",
+            (tenant, _followup_document_id(run_id, turn_id)),
+        ).fetchone()
+        if row is None:
+            continue
+        item["reviewStatus"] = "stale"
+        if row["state"] != "resolved":
+            continue
+        payload = row["payload_json"]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                continue
+        if not isinstance(payload, dict) or payload.get("reviewType") != "followup_correction_v1":
+            continue
+        if payload.get("runId") != run_id or payload.get("turnId") != turn_id:
+            continue
+        pair = agent_evidence_queries.followup_pair(session, tenant, run_id, turn_id)
+        if payload.get("priorTurnId") != pair["prior_turn_id"]:
+            continue
+        safe = redact_structure({key: value for key, value in pair.items()
+                                 if key != "prior_turn_id"})
+        if not isinstance(safe, dict) or any(not isinstance(safe.get(key), str)
+                                              for key in ("prior_request", "prior_answer",
+                                                          "later_request")):
+            continue
+        if payload.get("evidenceFingerprint") != _followup_fingerprint(
+                run_id, turn_id, pair["prior_turn_id"], safe):
+            continue
+        if not isinstance(payload.get("label"), str):
+            continue
+        item["reviewStatus"] = {"fail": "correction", "pass": "ordinary",
+                                "unclear": "unclear"}.get(payload.get("label"), "stale")
+
+
 def build_agent_runs_bundle(
     storage: str | os.PathLike[str], *, tenant: str, limit: int = 30,
     offset: int = 0,
@@ -940,8 +1069,12 @@ def build_agent_runs_bundle(
         or any(character not in "0123456789abcdef" for character in evaluator_fingerprint)
     ):
         raise ValueError("invalid evaluator fingerprint")
-    if view not in ("full", "list"):
+    if view not in ("full", "list", "followups"):
         raise ValueError("invalid runs view")
+    if view == "followups" and any(value is not None for value in (
+        run_id, run_ids, evaluator_fingerprint, selected_run_id, source_kind, agent_name,
+    )):
+        raise ValueError("follow-up review does not support run filters")
     if selected_run_id is not None and (
         view != "list" or not isinstance(selected_run_id, str)
         or not selected_run_id or len(selected_run_id.encode("utf-8")) > 256
@@ -955,6 +1088,12 @@ def build_agent_runs_bundle(
     configured = str(storage)
 
     def builder(session: _QuerySession) -> dict:
+        if view == "followups":
+            page = agent_evidence_queries.recent_followups(
+                session, tenant, limit=limit, offset=offset,
+            )
+            _followup_page_review_status(session, tenant, page)
+            return page
         if not agent_evidence_queries.available(session):
             empty = {
                 "summary": {"available": 0, "shown": 0},
@@ -1202,6 +1341,15 @@ def build_agent_runs_bundle(
     redacted = redact_structure(result)
     if not isinstance(redacted, dict):
         raise DashboardBundleLimitError("bounded agent-run bundle exceeded redaction budget")
+    if view == "followups":
+        if (not isinstance(redacted.get("followups"), list)
+                or len(redacted["followups"]) != len(result["followups"])
+                or any(not isinstance(row, dict) for row in redacted["followups"])):
+            raise DashboardBundleLimitError("follow-up navigation exceeded redaction budget")
+        for original, safe in zip(result["followups"], redacted["followups"], strict=True):
+            for field in ("runId", "turnId", "priorTurnId"):
+                safe[field] = original[field]
+        return redacted
     # These are dashboard navigation keys, not display content. Preserve the
     # exact stored identifiers after content redaction so a finding link can
     # resolve even when an opaque ID resembles PII.
@@ -1259,6 +1407,7 @@ def build_agent_run_detail(
     turn_limit: int = 20,
     turn_offset: int = 0,
     event_id: str | None = None,
+    turn_id: str | None = None,
     turn_evaluator_fingerprint: str | None = None,
 ) -> dict:
     """Read one tenant-scoped run with its canonical ordered evidence timeline."""
@@ -1284,6 +1433,11 @@ def build_agent_run_detail(
         not isinstance(event_id, str) or not event_id or len(event_id.encode("utf-8")) > 256
     ):
         raise ValueError("invalid event_id")
+    if turn_id is not None and (
+        not isinstance(turn_id, str) or not turn_id or "\0" in turn_id
+        or len(turn_id.encode("utf-8")) > 256
+    ):
+        raise ValueError("invalid turn_id")
     if turn_evaluator_fingerprint is not None and (
         not isinstance(turn_evaluator_fingerprint, str)
         or len(turn_evaluator_fingerprint) != 64
@@ -1304,6 +1458,7 @@ def build_agent_run_detail(
             session, tenant, run_id,
             event_limit=event_limit, event_offset=event_offset,
             turn_limit=turn_limit, turn_offset=turn_offset, event_id=event_id,
+            turn_id=turn_id,
         )
         if page is None:
             raise KeyError(run_id)
@@ -1495,6 +1650,7 @@ def build_agent_run_detail(
                 "responseState": turn.response_state.value,
                 "request": turn.user_request_redacted,
                 "response": turn.final_response_redacted,
+                "progress": turn.progress_redacted,
                 "requestTruncated": turn.request_truncated,
                 "responseTruncated": turn.response_truncated,
                 "evaluation": turn_judgments.get(turn.turn_id),
@@ -1510,8 +1666,8 @@ def build_agent_run_detail(
             } for turn in shown_turns],
             "turnPage": {
                 "available": available_turns, "shown": len(shown_turns),
-                "offset": turn_offset, "limit": turn_limit,
-                "truncated": turn_offset + len(shown_turns) < available_turns,
+                "offset": page["turnOffset"], "limit": turn_limit,
+                "truncated": page["turnOffset"] + len(shown_turns) < available_turns,
             },
             "events": [{
                 "eventId": event["event_id"],
@@ -2958,6 +3114,8 @@ def _empty_bundle(
 def _trace_samples(
     cur: _QuerySession,
     *,
+    trace_scope: str,
+    trace_scope_params: tuple[object, ...],
     requested_trace_id: str | None,
     trace_judge_status: str,
     trace_offset: int,
@@ -3010,39 +3168,80 @@ def _trace_samples(
         *page_trace_ids, *([requested_trace_id] if selected_outside_page else []),
     ]
     placeholders = ",".join("?" for _ in sample_trace_ids) or "NULL"
+    def bounded_column(field: str) -> str:
+        # Read complete text only when it can fit the preview, or when selected.
+        # The byte bound is safe for four-byte Unicode and SQLite strings with
+        # embedded NULs. Python applies the exact character limit afterward.
+        byte_length = (
+            f"length(CAST({field} AS BLOB))" if isinstance(cur, _SQLiteSession)
+            else f"octet_length({field})"
+        )
+        return (
+            f"CASE WHEN trace_id=? OR {byte_length}<=? "
+            f"THEN {field} ELSE NULL END AS {field}, "
+            f"{field} IS NOT NULL AS {field}_present"
+        )
+
     sample_rows = [dict(row) for row in cur.execute(
         # The select expressions are closed-set schema compatibility values.
         "SELECT trace_id, provider, request_model, "
         f"{cluster_select}, {operation_select}, "  # nosec B608
         "input_tokens, output_tokens, "
-        "latency_ms, cost_usd, finish_reason, error, started_at, "
+        "latency_ms, cost_usd, finish_reason, started_at, "
         f"{ended_at_select}, "
-        f"prompt_redacted, response_redacted FROM traces WHERE trace_id IN ({placeholders})",
-        tuple(sample_trace_ids),
+        f"{bounded_column('prompt_redacted')}, "
+        f"{bounded_column('response_redacted')}, "
+        f"{bounded_column('error')} "
+        f"FROM traces WHERE trace_id IN ({placeholders}) AND {trace_scope}",  # nosec B608
+        (
+            requested_trace_id, 4 * MAX_TRACE_CONTENT_PREVIEW_CHARACTERS,
+            requested_trace_id, 4 * 600,
+            requested_trace_id, 4 * MAX_TRACE_CONTENT_PREVIEW_CHARACTERS,
+            *sample_trace_ids, *trace_scope_params,
+        ),
     )]
     rows_by_trace_id = {row["trace_id"]: row for row in sample_rows}
     samples: list[dict[str, Any]] = []
     for row in (rows_by_trace_id[trace_id] for trace_id in sample_trace_ids):
         sample = dict(row)
+        present = {
+            field: bool(sample.pop(f"{field}_present"))
+            for field in ("prompt_redacted", "response_redacted", "error")
+        }
+        selected = row["trace_id"] == requested_trace_id
         sample["cluster_id"] = tcluster.get(row["trace_id"])
         sample["cluster_label"] = cluster_labels.get(
             sample["cluster_id"], sample["cluster_id"]
         )
-        for content_field in ("prompt_redacted", "response_redacted", "error"):
-            sample[content_field] = redact_structure(sample.get(content_field))
-        for content_field, flag in (
-            ("prompt_redacted", "promptPreviewTruncated"),
-            ("error", "errorPreviewTruncated"),
+        facts_deferred = False
+        for content_field, limit, label, deferred_key, truncated_key in (
+            ("prompt_redacted", MAX_TRACE_CONTENT_PREVIEW_CHARACTERS, "Prompt",
+             "promptPreviewDeferred", "promptPreviewTruncated"),
+            ("response_redacted", 600, "Response", "responsePreviewDeferred", None),
+            ("error", MAX_TRACE_CONTENT_PREVIEW_CHARACTERS, "Provider error",
+             "errorPreviewDeferred", "errorPreviewTruncated"),
         ):
-            content = sample[content_field]
-            sample[flag] = (
-                isinstance(content, str) and len(content) > MAX_TRACE_CONTENT_PREVIEW_CHARACTERS
+            content = sample.get(content_field)
+            deferred = (
+                not selected and present[content_field]
+                and (content is None or len(content) > limit)
             )
-            if sample[flag]:
-                sample[content_field] = content[:MAX_TRACE_CONTENT_PREVIEW_CHARACTERS]
+            facts_deferred = facts_deferred or deferred
+            sample[deferred_key] = deferred
+            preview = (
+                f"{label} preview deferred. Select this trace to inspect it."
+                if deferred else redact_structure(content)
+            )
+            if truncated_key is not None:
+                sample[truncated_key] = deferred or (
+                    isinstance(preview, str) and len(preview) > limit
+                )
+                if not deferred and isinstance(preview, str):
+                    preview = preview[:limit]
+            sample[content_field] = preview
         sample["providerKey"] = _provider_key(row["provider"])
         sample["contentCaptured"] = (
-            row["prompt_redacted"] is not None or row["response_redacted"] is not None
+            present["prompt_redacted"] or present["response_redacted"]
         )
         started_at = _dt(row["started_at"])
         sample["started_at"] = started_at.isoformat()
@@ -3055,21 +3254,20 @@ def _trace_samples(
         if judgment:
             sample["judgment"] = judgment
         sample["providerStatus"] = (
-            "provider_error" if sample.get("error") is not None else "no_error_recorded"
+            "provider_error" if present["error"] else "no_error_recorded"
         )
         sample["traceState"] = trace_evidence_state(
-            error=row["error"], ended_at=row["ended_at"],
+            error="" if present["error"] else None, ended_at=row["ended_at"],
         )
         sample["judgeStatus"] = judgment_status_by_trace.get(
             row["trace_id"], "not_judged"
         )
-        facts = deterministic_trace_facts(
-            error=row["error"],
-            prompt=row["prompt_redacted"],
-            response=row["response_redacted"],
-            ended_at=row["ended_at"],
+        facts = None if facts_deferred else deterministic_trace_facts(
+            error=row["error"], prompt=row["prompt_redacted"],
+            response=row["response_redacted"], ended_at=row["ended_at"],
         )
-        sample["deterministicFacts"] = {
+        sample["deterministicFactsDeferred"] = facts_deferred
+        sample["deterministicFacts"] = None if facts is None else {
             "providerOutcome": facts["provider_outcome"],
             "promptPresent": facts["prompt_present"],
             "responsePresent": facts["response_present"],
@@ -3126,7 +3324,9 @@ def _record_management_metric(
     metric: dict[str, Any], row: Mapping[str, Any], tags: object
 ) -> None:
     metric["calls"] += 1
-    state = trace_evidence_state(error=row["error"], ended_at=row["ended_at"])
+    state = trace_evidence_state(
+        error="" if row["error_present"] else None, ended_at=row["ended_at"]
+    )
     metric[{
         "error_recorded": "errorRecordedCalls",
         "ended_no_error_recorded": "endedNoErrorRecordedCalls",
@@ -3207,7 +3407,8 @@ def _time_series_read_model(
     bin_seconds = 30 * 60
     bins = defaultdict(lambda: defaultdict(lambda: {"n": 0, "err": 0, "lat": []}))
     for row in cur.execute(
-        "SELECT provider, started_at, latency_ms, error FROM traces "
+        "SELECT provider, started_at, latency_ms, "
+        "error IS NOT NULL AS error_present FROM traces "
         f"WHERE {trace_scope}",  # nosec B608 -- fixed tenant predicate
         trace_scope_params,
     ):
@@ -3217,7 +3418,7 @@ def _time_series_read_model(
         bucket = int((_dt(row["started_at"]) - t0).total_seconds() // bin_seconds)
         cell = bins[provider_key][bucket]
         cell["n"] += 1
-        if row["error"] is not None:
+        if row["error_present"]:
             cell["err"] += 1
         latency = _round_or_none(row["latency_ms"], 6)
         if latency is not None:
@@ -3504,7 +3705,8 @@ def _build(
         # contains request data or a database value.
         "SELECT trace_id, provider, request_model, "
         f"{response_model_column}, started_at, {ended_at_column}, {tenant_id_column}, "  # nosec B608
-        "input_tokens, output_tokens, error, latency_ms, cost_usd, "
+        "input_tokens, output_tokens, error IS NOT NULL AS error_present, "
+        "latency_ms, cost_usd, "
         f"{cluster_select}, {tags_column} AS workload_tags, "  # nosec B608
         f"{service_column}, {environment_column} FROM traces "  # nosec B608
         f"WHERE {trace_scope}",  # nosec B608 -- fixed tenant predicate
@@ -3853,7 +4055,7 @@ def _build(
         r = cur.execute(
             # ``provider_where`` is selected from two closed literals above.
             """SELECT COUNT(*) n,
-                      SUM(CASE WHEN error IS NOT NULL AND error<>'' THEN 1 ELSE 0 END) errors,
+                      SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) errors,
                       AVG(latency_ms) lat, SUM(input_tokens) it, SUM(output_tokens) ot,
                       SUM(cost_usd) cost,
                       SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) cost_unknown
@@ -3951,6 +4153,8 @@ def _build(
 
     samples, selected_trace, filtered_explorer_trace_ids = _trace_samples(
         cur,
+        trace_scope=trace_scope,
+        trace_scope_params=trace_scope_params,
         requested_trace_id=requested_trace_id,
         trace_judge_status=trace_judge_status,
         trace_offset=trace_offset,
@@ -4460,6 +4664,63 @@ def create_app(
     agent_runs.__annotations__["request"] = Request
     app.get("/api/runs")(agent_runs)
 
+    def followup_review_get(run_id: str, turn_id: str, request):
+        try:
+            return build_followup_review(
+                configured_storage, tenant=_authorized_tenant(request),
+                run_id=run_id, turn_id=turn_id,
+            )
+        except KeyError:
+            return JSONResponse({"error": "follow-up not found"}, status_code=404)
+        except ValueError as exc:
+            code = 400 if str(exc) == "invalid follow-up selection" else 409
+            return JSONResponse({"error": str(exc)}, status_code=code)
+        except (DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+            _log.exception("failed to read follow-up review")
+            return JSONResponse({"error": "follow-up review unavailable"}, status_code=503)
+
+    followup_review_get.__annotations__["request"] = Request
+    app.get("/api/runs/{run_id}/followup-review/{turn_id}")(followup_review_get)
+
+    def followup_review_put(run_id: str, turn_id: str, request, payload: dict[str, Any]):
+        if not setup_routes.authorized(request):
+            return JSONResponse({"error": "review authorization required"}, status_code=403)
+        labels = {"correction": "fail", "ordinary": "pass", "unclear": "unclear"}
+        if (set(payload) != {"label", "evidenceFingerprint", "expectedRevision"}
+                or not isinstance(payload.get("label"), str)
+                or payload["label"] not in labels
+                or not isinstance(payload.get("evidenceFingerprint"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", payload["evidenceFingerprint"]) is None
+                or (payload["expectedRevision"] is not None and
+                    (type(payload["expectedRevision"]) is not int or
+                     payload["expectedRevision"] < 1))):
+            return JSONResponse({"error": "invalid follow-up label"}, status_code=400)
+        current = followup_review_get(run_id, turn_id, request)
+        if isinstance(current, JSONResponse):
+            return current
+        if (current["evidenceFingerprint"] != payload["evidenceFingerprint"]
+                or current["revision"] != payload["expectedRevision"]):
+            return JSONResponse({"error": "follow-up evidence or review changed"}, status_code=409)
+        try:
+            saved = ControlStore(configured_storage).append(
+                _authorized_tenant(request), kind="review",
+                document_id=current["documentId"], state="resolved",
+                payload={
+                    "reviewType": "followup_correction_v1", "runId": run_id,
+                    "turnId": turn_id, "priorTurnId": current["priorTurnId"],
+                    "evidenceFingerprint": current["evidenceFingerprint"],
+                    "label": labels[payload["label"]],
+                },
+                expected_revision=payload["expectedRevision"],
+            )
+        except (OSError, TypeError, UnicodeError, ValueError):
+            return JSONResponse({"error": "follow-up review changed"}, status_code=409)
+        return {**current, "label": payload["label"], "stale": False,
+                "revision": saved["revision"]}
+
+    followup_review_put.__annotations__["request"] = Request
+    app.post("/api/runs/{run_id}/followup-review/{turn_id}")(followup_review_put)
+
     def agent_run_outcomes(request):
         try:
             return build_run_outcome_preview(
@@ -4515,6 +4776,7 @@ def create_app(
         turn_limit: int = Query(default=20, ge=1, le=50),
         turn_offset: int = Query(default=0, ge=0),
         event_id: str | None = None,
+        turn_id: str | None = None,
         turn_evaluator_fingerprint: str | None = None,
     ):
         try:
@@ -4528,6 +4790,7 @@ def create_app(
                 turn_limit=turn_limit,
                 turn_offset=turn_offset,
                 event_id=event_id,
+                turn_id=turn_id,
                 turn_evaluator_fingerprint=turn_evaluator_fingerprint,
             )
         except KeyError:
@@ -4711,7 +4974,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tenant-id",
         default=os.environ.get("VERDICT_TENANT_ID", LOCAL_TENANT),
-        help="Tenant scope to read and mutate (default: VERDICT_TENANT_ID or local)",
+        help="Tenant scope to read and mutate (default: VERDICT_TENANT_ID or __verdict_local__)",
     )
     parser.add_argument("--open-browser", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(

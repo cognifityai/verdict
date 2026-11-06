@@ -822,7 +822,8 @@ def test_live_postgres_dashboard_reads_existing_turn_schema_without_migration():
                    DROP COLUMN total_tokens,
                    DROP COLUMN token_usage_basis,
                    DROP COLUMN request_truncated,
-                   DROP COLUMN response_truncated"""
+                   DROP COLUMN response_truncated,
+                   DROP COLUMN progress_redacted"""
             )
 
         detail = build_agent_run_detail(scoped_dsn, tenant=tenant, run_id=run.run_id)
@@ -838,6 +839,7 @@ def test_live_postgres_dashboard_reads_existing_turn_schema_without_migration():
         "response": None,
         "requestTruncated": False,
         "responseTruncated": False,
+        "progress": None,
         "evaluation": None,
         "tokenUsage": {
             "inputTokens": None,
@@ -849,6 +851,40 @@ def test_live_postgres_dashboard_reads_existing_turn_schema_without_migration():
             "basis": None,
         },
     }]
+
+
+def test_live_postgres_adds_progress_column_to_pre_progress_schema():
+    import psycopg
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        existing = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        existing.close()
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection:
+            connection.execute("ALTER TABLE agent_turns DROP COLUMN progress_redacted")
+            connection.execute(
+                "DELETE FROM verdict_schema_migrations "
+                "WHERE name='schema_2026_11_02_turn_progress'"
+            )
+
+        reopened = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        try:
+            now = datetime.now(timezone.utc)
+            bundle = AgentRunBundle(
+                SourceSession("source", "tenant-a", "codex", "a" * 64, now, now),
+                AgentRun("run", "source", "tenant-a", now,
+                         ExecutionStatus.COMPLETED, ended_at=now),
+                (AgentTurn("turn", "run", 0, now, ExecutionStatus.COMPLETED,
+                           ended_at=now,
+                           progress_redacted="10:00 canary@example.invalid working"),),
+            )
+            reopened.replace_agent_run_bundle(bundle)
+            rows = reopened._fetchall(
+                "SELECT progress_redacted FROM agent_turns WHERE tenant_id=%s",
+                ("tenant-a",),
+            )
+            assert rows == [("10:00 <EMAIL> working",)]
+        finally:
+            reopened.close()
 
 
 def test_live_postgres_codex_item_message_rescan_fills_turn_request(tmp_path):
@@ -1080,8 +1116,8 @@ def test_live_postgres_agent_capture_rolls_back_trace_and_hierarchy(monkeypatch)
     storage = PostgresStorage(DSN, min_pool=1, max_pool=1)
     original = storage._write_normalized_bundle_cursor
 
-    def fail_after_hierarchy(cur, candidate):
-        original(cur, candidate)
+    def fail_after_hierarchy(cur, candidate, *args, **kwargs):
+        original(cur, candidate, *args, **kwargs)
         raise RuntimeError("injected capture failure")
 
     monkeypatch.setattr(storage, "_write_normalized_bundle_cursor", fail_after_hierarchy)

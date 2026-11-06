@@ -414,6 +414,7 @@ class BufferedStorage:
         historical_facts=(),
         full_projection=None,
         recent_traces=(),
+        automatic_turn_ids: tuple[str, ...] = (),
     ) -> None:
         replace_local = getattr(self._inner, "_replace_local_agent_capture", None)
         if callable(replace_local):
@@ -424,6 +425,7 @@ class BufferedStorage:
                 recent_facts=recent_facts, historical_facts=historical_facts,
                 full_projection=full_projection,
                 recent_traces=recent_traces,
+                automatic_turn_ids=automatic_turn_ids,
             )
             return
         if source_revision is not None:

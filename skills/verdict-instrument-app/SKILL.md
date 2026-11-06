@@ -6,7 +6,7 @@ description: Inspect an existing LLM application and plan, implement, or audit a
 # Instrument an App with Verdict
 
 Instrument only behavior supported by the released Verdict target, and distinguish
-what was executed from what was merely proposed. Verdict `0.1.0b5` is a Python
+what was executed from what was merely proposed. Verdict `0.1.0b6` is a Python
 public beta, not a production-readiness claim.
 
 ## Resolve the installed runtime before doing anything
@@ -63,7 +63,7 @@ release, refresh the skill from that tagged release before continuing.
 Read repository instructions and existing observability, privacy, deployment, and
 scheduler conventions. Identify the released Verdict version to use. For the
 compatibility target and its concrete limitations, read
-[`references/verdict-0.1.0b5.md`](references/verdict-0.1.0b5.md). Its capture
+[`references/verdict-0.1.0b6.md`](references/verdict-0.1.0b6.md). Its capture
 coverage is pinned in the version-matched release profile linked there.
 
 Do not treat an unpublished local Verdict worktree as released functionality.

@@ -15,6 +15,7 @@ from verdict import (
     SourceSession,
 )
 from verdict.analysis import AnalysisPolicy, analyze_agent_run
+from verdict.redaction import sanitize_agent_run_bundle
 
 NOW = datetime(2026, 8, 31, tzinfo=timezone.utc)
 
@@ -107,6 +108,34 @@ def test_analysis_reports_observed_failures_and_metrics_without_judge() -> None:
         "command_failed",
     }
     assert all(finding.judge_used is False for finding in report.findings)
+
+
+def test_explicit_negative_feedback_is_linked_without_inventing_task_failure() -> None:
+    bundle = _bundle()
+    sequence = iter(range(7))
+
+    def feedback(event_id: str, kind: str, value: object) -> AgentEvent:
+        return AgentEvent(event_id, "turn", next(sequence), NOW, AgentEventType.FEEDBACK,
+                          ExecutionStatus.UNKNOWN, "test:feedback",
+                          {"kind": kind, "value": value}, PrivacyClassification.REDACTED)
+
+    observed = [feedback("negative-1", "thumbs_down", True),
+                feedback("negative-2", "thumbs_down", True)]
+    unrelated = [feedback("false", "thumbs_down", False),
+                 feedback("number", "thumbs_down", 1),
+                 feedback("string", "thumbs_down", "true"),
+                 feedback("followup", "follow_up_question", True),
+                 feedback("regenerate", "regenerate", True)]
+    report = analyze_agent_run(replace(bundle, events=tuple(observed + unrelated)))
+    matching = [item for item in report.findings if item.code == "negative_feedback_recorded"]
+    assert len(matching) == 1
+    assert matching[0].severity == "warning"
+    assert matching[0].evidence_event_ids == ("negative-1", "negative-2")
+    assert "failure" not in matching[0].message.lower()
+    assert not any(item.code == "negative_feedback_recorded" for item in
+                   analyze_agent_run(replace(bundle, events=tuple(
+                       replace(item, sequence=index) for index, item in enumerate(unrelated)
+                   ))).findings)
 
 
 def test_timed_out_tool_result_is_a_recorded_failure() -> None:
@@ -382,7 +411,7 @@ def test_policy_checks_required_steps_prohibited_tools_and_json() -> None:
     assert {"required_step_missing", "prohibited_tool_used", "response_schema_invalid"} <= codes
 
 
-def test_loop_detection_is_explicit_and_policy_controlled() -> None:
+def test_repeated_tool_calls_do_not_produce_unverifiable_identity_finding() -> None:
     bundle = _bundle()
     repeats = tuple(
         replace(event, event_id=f"loop-{index}", sequence=4 + index)
@@ -394,36 +423,37 @@ def test_loop_detection_is_explicit_and_policy_controlled() -> None:
         AnalysisPolicy(repeated_tool_call_threshold=4),
     )
 
-    loop = next(finding for finding in report.findings if finding.code == "possible_tool_loop")
-    assert loop.evidence_event_ids == ("e1", "loop-0", "loop-1", "loop-2")
-    assert loop.message == (
-        "1 tool-call pattern repeated at least 4 times within a turn "
-        "(4 recorded calls total)."
-    )
+    assert not any(finding.code == "possible_tool_loop" for finding in report.findings)
 
 
-def test_loop_detection_canonicalizes_structured_tool_arguments() -> None:
+def test_loop_detection_does_not_claim_identical_calls_after_lossy_redaction() -> None:
     bundle = _bundle()
-    repeats = tuple(
-        replace(
-            bundle.events[1],
-            event_id=f"structured-{index}",
-            sequence=4 + index,
-            attributes={
-                "tool_name": "shell",
-                "call_id": f"structured-{index}",
-                "arguments": {"cwd": "/tmp", "cmd": "pytest"},
-            },
-        )
+    calls = tuple(
+        replace(bundle.events[1], event_id=f"read-{index}", sequence=4 + index,
+                attributes={"tool_name": "web_read", "call_id": f"read-{index}",
+                            "arguments": f'{{"url":"https://example.invalid/page/{index}"}}'})
         for index in range(4)
     )
+    sanitized = sanitize_agent_run_bundle(replace(bundle, events=(*bundle.events, *calls)))
+    assert {event.attributes["arguments"] for event in sanitized.events[-4:]} == {
+        '{"url":"<URL>"}'
+    }
+    report = analyze_agent_run(sanitized, AnalysisPolicy(repeated_tool_call_threshold=4))
+    assert not any(finding.code == "possible_tool_loop" for finding in report.findings)
 
-    report = analyze_agent_run(
-        replace(bundle, events=bundle.events + repeats),
-        AnalysisPolicy(repeated_tool_call_threshold=4),
+
+def test_loop_detection_does_not_claim_identical_calls_when_encoded_keys_disappear() -> None:
+    bundle = _bundle()
+    calls = tuple(
+        replace(bundle.events[1], event_id=f"key-{index}", sequence=4 + index,
+                attributes={"tool_name": "lookup", "call_id": f"key-{index}",
+                            "arguments": {rf"\u0061{index}": f"item-{index}"}})
+        for index in range(4)
     )
-
-    assert any(finding.code == "possible_tool_loop" for finding in report.findings)
+    sanitized = sanitize_agent_run_bundle(replace(bundle, events=(*bundle.events, *calls)))
+    assert [event.attributes["arguments"] for event in sanitized.events[-4:]] == [{}] * 4
+    report = analyze_agent_run(sanitized, AnalysisPolicy(repeated_tool_call_threshold=4))
+    assert not any(finding.code == "possible_tool_loop" for finding in report.findings)
 
 
 def test_analysis_counts_explicit_retries_and_failed_tests() -> None:
@@ -456,30 +486,6 @@ def test_analysis_counts_explicit_retries_and_failed_tests() -> None:
     assert report.metrics["retries"] == 1
     assert report.metrics["test_failures"] == 1
     assert any(finding.code == "test_failed" for finding in report.findings)
-
-
-def test_different_calls_to_the_same_tool_are_not_called_a_loop() -> None:
-    bundle = _bundle()
-    calls = tuple(
-        replace(
-            bundle.events[1],
-            event_id=f"different-{index}",
-            sequence=4 + index,
-            attributes={
-                "tool_name": "shell",
-                "call_id": f"different-{index}",
-                "arguments": f'{{"cmd":"step-{index}"}}',
-            },
-        )
-        for index in range(5)
-    )
-
-    report = analyze_agent_run(
-        replace(bundle, events=bundle.events + calls),
-        AnalysisPolicy(repeated_tool_call_threshold=4),
-    )
-
-    assert not any(finding.code == "possible_tool_loop" for finding in report.findings)
 
 
 def test_omitted_capture_is_exposed_as_a_limit_not_silent_completeness() -> None:

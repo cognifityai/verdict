@@ -87,7 +87,7 @@ the wheel built from this checkout.
 uv build packages/verdict --wheel --out-dir build/customer-managed
 # Use the exact wheel path printed by the build; keep just one wheel in this ignored directory.
 docker build -f deploy/customer-managed/Dockerfile \
-  --build-arg VERDICT_WHEEL=build/customer-managed/cognifity_verdict-0.1.0b5-py3-none-any.whl \
+  --build-arg VERDICT_WHEEL=build/customer-managed/cognifity_verdict-0.1.0b6-py3-none-any.whl \
   -t verdict-local:review .
 ```
 
@@ -120,8 +120,12 @@ PostgreSQL receipt connection at that moment; dashboard `/api/health` checks
 only its web process. Neither proves a completed monitoring cycle. Confirm
 the saved plan and worker state through authenticated `/api/readiness`.
 
-Use the authenticated dashboard's `/api/readiness` response to confirm a
-completed worker cycle for the saved plan revision. A running worker
+Use the authenticated dashboard's `/api/readiness` response to confirm
+`lastWorkerCycle.state=completed` with the active schedule's revision and a
+recent worker heartbeat. `lastCycle` is the latest check of either kind; a
+later manual check can appear there while `lastWorkerCycle` still verifies the
+recurring run. A failed or unfinished worker attempt replaces the prior
+worker result, and a new schedule revision needs its own completed cycle. A running worker
 container or healthy web process alone does not prove monitoring is active.
 The repository's synthetic integration checks exercise separate processes,
 file-spool and direct-PostgreSQL capture, linked Trace and Span records, and

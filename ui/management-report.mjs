@@ -211,11 +211,13 @@ export function buildManagementReport(data = {}, { source = "live", generatedAt 
     title: "Verdict LLM Performance & Utilization Report",
     generatedAt: generated,
     period,
-    source: source === "sample" ? "Synthetic sample" : source === "live"
-      ? "Live Verdict store" : "Waiting for live store",
+    source: source === "live"
+      ? data?.meta?.dataProvenance === "synthetic"
+        ? "Synthetic Verdict store" : "Live Verdict store"
+      : "Waiting for live store",
     range: `${periodRange || (calls
       ? `${readableDate(rawScope.firstCapturedAt)} – ${readableDate(rawScope.latestCapturedAt)}`
-      : "No application telemetry captured")} · UTC`,
+      : "No application model calls captured")} · UTC`,
     kpis: [
       { label: "Application LLM requests", value: valid ? formatNumber(calls) : "No data", note: "Verdict judge calls excluded" },
       { label: "Tokens processed", value: valid && (!calls || scope.tokenKnownCalls) ? formatNumber(scope.totalTokens) : "Unavailable", note: calls && scope.tokenKnownCalls === calls ? "Complete token coverage" : calls ? `${formatNumber(scope?.tokenKnownCalls ?? 0)} of ${formatNumber(calls)} calls complete` : valid ? "No calls captured" : "No token evidence" },
@@ -251,7 +253,7 @@ export function buildManagementReport(data = {}, { source = "live", generatedAt 
     quality,
     attention: attention.length ? attention : [calls
       ? "No issues were surfaced by the evidence available to this report."
-      : "No application telemetry is available yet."],
+      : "No application model calls are available to this report yet; captured Agent Runs appear in Investigation."],
   };
 }
 

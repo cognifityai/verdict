@@ -194,7 +194,7 @@ _EVALUABLE_LOCAL_TURN = (
 # Bump this marker whenever _SCHEMA or the startup migrations below change.
 # It is committed with those changes so an already-current process restart
 # does not take DDL locks against active evidence writers.
-_SCHEMA_REVISION = "schema_2026_10_20_p9_tail"
+_SCHEMA_REVISION = "schema_2026_11_02_turn_progress"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversation_snapshots (
@@ -355,6 +355,7 @@ CREATE TABLE IF NOT EXISTS agent_turns (
         'codex_turn_delta','claude_provider_response_sum')),
     request_truncated BOOLEAN NOT NULL DEFAULT FALSE,
     response_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+    progress_redacted TEXT,
     PRIMARY KEY (tenant_id, run_id, turn_id),
     UNIQUE (tenant_id, run_id, sequence),
     FOREIGN KEY (tenant_id, run_id) REFERENCES agent_runs(tenant_id, run_id)
@@ -1055,6 +1056,7 @@ class PostgresStorage:
                     ),
                     ("request_truncated", "BOOLEAN NOT NULL DEFAULT FALSE"),
                     ("response_truncated", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                    ("progress_redacted", "TEXT"),
                 ]:
                     cur.execute(
                         f"ALTER TABLE agent_turns ADD COLUMN IF NOT EXISTS {col} {ddl}"
@@ -1304,6 +1306,9 @@ class PostgresStorage:
         cur,
         bundle: AgentRunBundle | AgentCaptureBatch,
         text_compatibility: _LegacyLocalTextUpgrade | None = None,
+        *,
+        replace_progress: bool = False,
+        automatic_turn_ids: frozenset[str] = frozenset(),
     ) -> None:
         bundle = normalize_bundle_timestamps(bundle)
         tenant_id = bundle.run.tenant_id
@@ -1342,6 +1347,8 @@ class PostgresStorage:
                     merge_agent_turn(
                         current_turns.get(turn.turn_id),
                         turn,
+                        replace_progress=replace_progress,
+                        clear_local_request=turn.turn_id in automatic_turn_ids,
                         legacy_preview=(
                             text_compatibility.turn_previews.get(turn.turn_id)
                             if text_compatibility is not None else None
@@ -1427,8 +1434,9 @@ class PostgresStorage:
                    user_request_redacted,final_response_redacted,
                    request_state,response_state,input_tokens,cached_input_tokens,
                    cache_write_input_tokens,output_tokens,reasoning_output_tokens,
-                   total_tokens,token_usage_basis,request_truncated,response_truncated
-               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   total_tokens,token_usage_basis,request_truncated,response_truncated,
+                   progress_redacted
+               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (tenant_id,run_id,turn_id) DO UPDATE SET
                    ended_at=EXCLUDED.ended_at,
                    status=EXCLUDED.status,
@@ -1444,7 +1452,8 @@ class PostgresStorage:
                    total_tokens=EXCLUDED.total_tokens,
                    token_usage_basis=EXCLUDED.token_usage_basis,
                    request_truncated=EXCLUDED.request_truncated,
-                   response_truncated=EXCLUDED.response_truncated""",
+                   response_truncated=EXCLUDED.response_truncated,
+                   progress_redacted=EXCLUDED.progress_redacted""",
             [
                 (
                     run.tenant_id,
@@ -1467,6 +1476,7 @@ class PostgresStorage:
                     turn.token_usage_basis,
                     turn.request_truncated,
                     turn.response_truncated,
+                    turn.progress_redacted,
                 )
                 for turn in turns
             ],
@@ -1677,6 +1687,7 @@ class PostgresStorage:
         historical_facts: tuple[LocalRecentFact, ...] = (),
         full_projection: LocalFullProjection | None = None,
         recent_traces: tuple[Trace, ...] = (),
+        automatic_turn_ids: tuple[str, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
         prepared_recent, recent_ids = _prepare_linked_traces(
@@ -1696,6 +1707,7 @@ class PostgresStorage:
             recent_window_json=recent_window_json,
             recent_facts=recent_facts, historical_facts=historical_facts,
             full_projection=full_projection,
+            automatic_turn_ids=automatic_turn_ids,
         )
 
     def append_agent_capture(
@@ -1719,6 +1731,7 @@ class PostgresStorage:
         recent_facts: tuple[LocalRecentFact, ...] = (),
         historical_facts: tuple[LocalRecentFact, ...] = (),
         full_projection: LocalFullProjection | None = None,
+        automatic_turn_ids: tuple[str, ...] = (),
     ) -> None:
         window = (validate_recent_window_json(
             recent_window_json, run_id=capture.run.run_id, revision=local_revision,
@@ -1736,10 +1749,31 @@ class PostgresStorage:
                                  historical_facts, local_revision)
         all_recent_facts = (*recent_facts, *historical_facts,
                             *(full_projection.facts if full_projection else ()))
+        automatic_ids = frozenset(automatic_turn_ids)
+        if automatic_ids and (
+            local_revision is None or capture.session.source_kind != "claude-code"
+            or any(
+                turn.user_request_redacted is not None
+                for turn in (*capture.turns,
+                             *(full_projection.tail_turns if full_projection else ()))
+                if turn.turn_id in automatic_ids
+            )
+        ):
+            raise ValueError("invalid automatic Turn reclassification")
+        automatic_trace_ids = {
+            event.trace_id
+            for event in (*capture.events, *(fact.event for fact in all_recent_facts))
+            if event.turn_id in automatic_ids and event.trace_id is not None
+        }
         from psycopg import IntegrityError
 
         try:
             with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+                if automatic_ids:
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"cluster-registry:{capture.run.tenant_id}",),
+                    )
                 for lock_key in (
                     f"agent-source-id:{capture.run.tenant_id}:{capture.session.source_session_id}",
                     "agent-source-locator:"
@@ -1788,6 +1822,7 @@ class PostgresStorage:
                                 text_compatibility.turn_previews
                                 if text_compatibility is not None else None
                             ),
+                            automatic_turn_ids=frozenset(automatic_turn_ids),
                         )
                     cur.execute(
                         "DELETE FROM agent_events WHERE tenant_id=%s AND run_id=%s "
@@ -1810,6 +1845,21 @@ class PostgresStorage:
                                 "AND event_id=%s",
                                 (capture.run.tenant_id, capture.run.run_id, prior_limit),
                             )
+                if automatic_ids:
+                    cur.execute(
+                        "SELECT turn_id,trace_id FROM agent_events "
+                        "WHERE tenant_id=%s AND run_id=%s AND trace_id IS NOT NULL "
+                        "UNION ALL SELECT turn_id,trace_id FROM local_recent_event_facts "
+                        "WHERE tenant_id=%s AND run_id=%s AND trace_id IS NOT NULL",
+                        (capture.run.tenant_id, capture.run.run_id,
+                         capture.run.tenant_id, capture.run.run_id),
+                    )
+                    projected_trace_ids = {trace.trace_id for trace in capture_traces}
+                    if any(
+                        turn_id in automatic_ids and trace_id not in projected_trace_ids
+                        for turn_id, trace_id in cur.fetchall()
+                    ):
+                        raise ValueError("local_source_reprojection_required")
                 prepared_traces = []
                 message_updates: set[str] = set()
                 for trace in capture_traces:
@@ -1820,9 +1870,19 @@ class PostgresStorage:
                     )
                     row = cur.fetchone()
                     current = self._row_to_trace(row) if row else None
+                    if (current is not None and current.prompt_redacted is not None
+                            and trace.trace_id in automatic_trace_ids):
+                        cur.execute(
+                            "SELECT 1 FROM trace_cluster_assignments "
+                            "WHERE tenant_id=%s AND trace_id=%s LIMIT 1",
+                            (capture.run.tenant_id, trace.trace_id),
+                        )
+                        if current.cluster_id is not None or cur.fetchone() is not None:
+                            raise ValueError("local_source_registry_conflict")
                     prepared = merge_capture_trace(
                         current,
                         trace,
+                        clear_local_request=trace.trace_id in automatic_trace_ids,
                         legacy_preview=(
                             text_compatibility.trace_previews.get(trace.trace_id)
                             if text_compatibility is not None else None
@@ -1852,7 +1912,7 @@ class PostgresStorage:
                     if fact.event.trace_id is not None
                 }
                 for trace in prepared_traces:
-                    if trace.trace_id in recent_trace_ids:
+                    if trace.trace_id in recent_trace_ids | automatic_trace_ids:
                         cur.execute(
                             "INSERT INTO local_recent_trace_evidence "
                             "(trace_id,tenant_id,evidence_fingerprint) VALUES (%s,%s,%s) "
@@ -1872,12 +1932,12 @@ class PostgresStorage:
                     )
                     tenants = {trace_id: tenant_id for trace_id, tenant_id in cur.fetchall()}
                     require_same_tenant_linked_traces(capture.run.tenant_id, linked_ids, tenants)
-                if text_compatibility is None:
-                    self._write_normalized_bundle_cursor(cur, capture)
-                else:
-                    self._write_normalized_bundle_cursor(
-                        cur, capture, text_compatibility
-                    )
+                self._write_normalized_bundle_cursor(
+                    cur, capture, text_compatibility,
+                    replace_progress=(local_revision is not None
+                                      and capture.session.source_kind == "codex"),
+                    automatic_turn_ids=frozenset(automatic_turn_ids),
+                )
                 if local_revision is not None:
                     cur.execute(
                         "DELETE FROM local_tail_turn_facts WHERE tenant_id=%s AND run_id=%s",
@@ -3738,7 +3798,7 @@ class PostgresStorage:
         "j.created_at, j.judge_models, j.dimensions, "
         "j.position_swap_consistent, j.evaluator_provider, "
         "j.evaluator_config, j.evaluator_fingerprint, "
-        "j.expected_dimensions, j.status, j.error"
+        "j.expected_dimensions, j.status, j.error, j.local_recent_evidence_fingerprint"
     )
 
     def insert_judgment(self, judgment: Judgment) -> None:
@@ -3752,7 +3812,7 @@ class PostgresStorage:
                 local_recent_evidence_fingerprint
             ) VALUES (
                 %s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s::jsonb,%s,%s::jsonb,%s,%s,
-                (SELECT evidence_fingerprint FROM local_recent_trace_evidence WHERE trace_id=%s)
+                %s
             ) ON CONFLICT (judgment_id) DO UPDATE SET
                 trace_id = EXCLUDED.trace_id,
                 rubric_name = EXCLUDED.rubric_name,
@@ -3783,7 +3843,7 @@ class PostgresStorage:
                 json.dumps(judgment.expected_dimensions),
                 judgment.status.value,
                 judgment.error,
-                judgment.trace_id,
+                judgment.evaluated_trace_fingerprint,
             ),
         )
 
@@ -3819,6 +3879,7 @@ class PostgresStorage:
             status=JudgmentStatus(row[12] or "completed"),
             error=row[13],
             position_swap_consistent=row[7],
+            evaluated_trace_fingerprint=row[14],
         )
 
     def list_judgments_for_cluster(
@@ -4420,6 +4481,10 @@ class PostgresStorage:
     ) -> None:
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"cluster-registry:{version.tenant_id}",),
+            )
+            cur.execute(
                 "INSERT INTO active_cluster_registry (tenant_id,version_id,generation) "
                 "VALUES (%s,NULL,0) ON CONFLICT (tenant_id) DO NOTHING",
                 (version.tenant_id,),
@@ -4547,6 +4612,14 @@ class PostgresStorage:
             ):
                 raise ValueError("cluster assignment tenant mismatch")
             cur.execute(
+                "SELECT 1 FROM traces t JOIN local_recent_trace_evidence r "
+                "ON r.trace_id=t.trace_id WHERE t.tenant_id=%s AND t.trace_id=%s "
+                "AND t.prompt_redacted IS NULL LIMIT 1",
+                (authorized_tenant, assignment.trace_id),
+            )
+            if cur.fetchone() is not None:
+                raise ValueError("local_source_registry_conflict")
+            cur.execute(
                 """INSERT INTO trace_cluster_assignments (
                   tenant_id,version_id,trace_id,origin,status,cluster_id,cluster_kind,
                   reason,distance,assigned_at
@@ -4580,6 +4653,10 @@ class PostgresStorage:
         assignments: list[TraceClusterAssignment],
     ) -> None:
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"cluster-registry:{authorized_tenant}",),
+            )
             self._insert_cluster_assignments_cursor(cur, authorized_tenant, assignments)
 
     def list_trace_cluster_assignments(
@@ -4703,6 +4780,10 @@ class PostgresStorage:
             raise ValueError("activation action is invalid")
         now = datetime.now().astimezone()
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"cluster-registry:{authorized_tenant}",),
+            )
             cur.execute(
                 "INSERT INTO active_cluster_registry (tenant_id,version_id,generation) "
                 "VALUES (%s,NULL,0) ON CONFLICT (tenant_id) DO NOTHING",

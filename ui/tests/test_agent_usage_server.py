@@ -7,7 +7,7 @@ import os
 import sqlite3
 from contextlib import ExitStack
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -147,7 +147,7 @@ def test_day_issue_reader_counts_overlapping_canonical_and_recent_identity_once(
 def test_usage_groups_turns_by_utc_day_and_drills_into_session_without_cross_tenant_data(tmp_path):
     path = tmp_path / "usage.db"
     storage = SQLiteStorage(str(path))
-    first = _turn("run-a", "a-1", 0, _dt(7, 23), 100,
+    first = _turn("run-a", "a-1", 0, _dt(7, 22), 100,
                   input_tokens=80, output_tokens=20, ended=_dt(8, 0))
     first = replace(first, user_request_redacted="hidden-canary-example",
                     request_state="present")
@@ -176,6 +176,10 @@ def test_usage_groups_turns_by_utc_day_and_drills_into_session_without_cross_ten
     assert report["selectedSession"]["totalTokens"] == 400
     assert report["selectedSession"]["turns"][0]["turnId"] == "a-2"
     assert report["selectedSession"]["topTurns"][0]["turnId"] == "a-2"
+    assert report["selectedSession"]["longestTurnSpan"] == {
+        "runId": "run-a", "turnId": "a-1", "seconds": 7200,
+    }
+    assert report["selectedSession"]["turnSpanKnownTurns"] == 2
     assert report["daySources"][0]["sourceKind"] == "synthetic-codex"
     assert report["daySources"][0]["totalTokens"] == 300
     assert report["dayExplanation"]["day"] == "2026-10-08"
@@ -195,7 +199,51 @@ def test_usage_groups_turns_by_utc_day_and_drills_into_session_without_cross_ten
     response = asyncio.run(request())
     assert response.status_code == 200
     assert response.json()["selectedSession"]["totalTokens"] == 400
+    assert response.json()["selectedSession"]["longestTurnSpan"]["seconds"] == 7200
     assert response.json()["dayExplanation"]["topSessions"][0]["dayTokens"] == 300
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_session_turn_span_ignores_unfinished_and_reversed_times(tmp_path, backend):
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from verdict.storage.postgres import PostgresStorage
+
+            from packages.verdict.tests._postgres_test_safety import (
+                isolated_test_dsn,
+                validate_test_dsn,
+            )
+            dsn, reason = validate_test_dsn(
+                os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+            )
+            if dsn is None:
+                pytest.skip(reason)
+            storage_url = stack.enter_context(isolated_test_dsn(dsn))
+            storage = PostgresStorage(storage_url)
+        else:
+            path = tmp_path / "turn-span.db"
+            storage_url = f"sqlite:///{path}"
+            storage = SQLiteStorage(str(path))
+        stack.callback(storage.close)
+        valid = _turn(
+            "run-a", "valid", 0,
+            datetime(2026, 10, 8, 1, tzinfo=timezone(timedelta(hours=-7))),
+            None, ended=_dt(8, 9),
+        )
+        missing = replace(_turn("run-a", "missing", 1, _dt(8, 10), None), ended_at=None)
+        reversed_time = replace(_turn("run-a", "reversed", 2, _dt(8, 12), None),
+                                ended_at=_dt(8, 11))
+        storage.replace_agent_run_bundle(_bundle(
+            "local", "run-a", (valid, missing, reversed_time), session_id="session-a",
+        ))
+        selected = build_agent_usage_bundle(
+            storage_url, tenant="local", now=_dt(8, 20), day="2026-10-08",
+            session_id="session-a", source_kind="synthetic-codex",
+        )["selectedSession"]
+        assert selected["turnSpanKnownTurns"] == 1
+        assert selected["longestTurnSpan"] == {
+            "runId": "run-a", "turnId": "valid", "seconds": 3600,
+        }
 
 
 def test_day_explanation_compares_only_prior_active_utc_days(tmp_path):

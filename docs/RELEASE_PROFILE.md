@@ -1,4 +1,4 @@
-# Run a pilot with Verdict 0.1.0b5
+# Run a pilot with Verdict 0.1.0b6
 
 Use this profile to demonstrate Verdict on captured application agents and
 verified provider calls without presenting the beta as production-ready. The
@@ -18,13 +18,13 @@ python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
 ```
 
-For this release, the final command prints `0.1.0b5 0.1.0b5 0.1.0b5`. Add the `postgres`
+For this release, the final command prints `0.1.0b6 0.1.0b6 0.1.0b6`. Add the `postgres`
 extra only when the existing deployment uses PostgreSQL. Back up an existing
 store and dependency lockfile before upgrading; the additive migrations
 preserve existing trace and evaluation tables.
 
 For a container deployment, use the versioned image
-`ghcr.io/cognifityai/verdict:0.1.0b5` after the release workflow succeeds.
+`ghcr.io/cognifityai/verdict:0.1.0b6` after the release workflow succeeds.
 It provides the dashboard and the matching eval package. Run PostgreSQL
 separately, keep its port private, and supply the storage URL and dashboard
 credentials through the deployment's secret mechanism. Builds from the current
@@ -135,7 +135,7 @@ semantic quality.
 
 The pilot is ready to show only when all of these are true:
 
-1. All three installed packages report `0.1.0b5` and `python -m pip check` passes.
+1. All three installed packages report `0.1.0b6` and `python -m pip check` passes.
 2. The application uses only a provider entry point in the supported column.
 3. `buffered_writes` is `False`; content capture is approved for the named pilot
    data or explicitly disabled before collection.

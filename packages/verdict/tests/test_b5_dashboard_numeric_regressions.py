@@ -2,9 +2,11 @@
 
 import math
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import verdict.dashboard.app as dashboard_app
 from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
 from fastapi.testclient import TestClient
 from verdict.dashboard import create_app
@@ -35,6 +37,49 @@ def test_dashboard_home_bounds_many_long_trace_prompts(tmp_path):
     assert len(samples) == 30
     assert all(len(sample["prompt_redacted"]) <= 8_000 for sample in samples)
     assert all(sample["promptPreviewTruncated"] for sample in samples)
+
+
+def test_long_trace_preview_is_deferred_until_exact_selection(tmp_path, monkeypatch):
+    path = tmp_path / "deferred-preview.db"
+    storage = SQLiteStorage(str(path))
+    trace = Trace(provider="synthetic", request_model="sample-model",
+                  prompt_redacted="short", response_redacted="short")
+    storage.insert_trace(trace)
+    storage.close()
+    canary = "sk-ant-" + "S" * 24
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE traces SET prompt_redacted=?,response_redacted=?,error=? WHERE trace_id=?",
+            ("p" * 7_995 + canary + "q" * 40_000,
+             "r" * 40_000, "e" * 40_000, trace.trace_id),
+        )
+    original = dashboard_app.redact_structure
+    long_strings = []
+
+    def tracked(value, *args, **kwargs):
+        if isinstance(value, str) and len(value) > 8_000:
+            long_strings.append(len(value))
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(dashboard_app, "redact_structure", tracked)
+    client = TestClient(create_app(storage=str(path)))
+    listed = client.get("/api/data")
+    assert listed.status_code == 200
+    assert canary not in listed.text
+    sample = listed.json()["samples"][0]
+    assert sample["promptPreviewDeferred"] is True
+    assert sample["responsePreviewDeferred"] is True
+    assert sample["errorPreviewDeferred"] is True
+    assert not long_strings
+
+    selected = client.get("/api/data", params={"trace_id": trace.trace_id})
+    assert selected.status_code == 200
+    assert canary not in selected.text
+    assert "sk-ant-" not in selected.text
+    exact = selected.json()["samples"][0]
+    assert exact["prompt_redacted"].startswith("p" * 100)
+    assert exact["promptPreviewDeferred"] is False
+    assert long_strings
 
 
 def test_dashboard_home_bounds_many_long_provider_errors(tmp_path):
@@ -107,6 +152,17 @@ def test_dashboard_home_bounds_long_prompts_on_postgres():
         assert len(samples) == 30
         assert all(sample["promptPreviewTruncated"] for sample in samples)
         assert all(sample["errorPreviewTruncated"] for sample in samples)
+        assert all(sample["promptPreviewDeferred"] for sample in samples)
+        assert all(sample["errorPreviewDeferred"] for sample in samples)
+        selected = TestClient(create_app(storage=scoped_dsn)).get(
+            "/api/data", params={"trace_id": samples[0]["trace_id"]},
+        )
+        assert selected.status_code == 200
+        exact = next(sample for sample in selected.json()["samples"]
+                     if sample["trace_id"] == samples[0]["trace_id"])
+        assert exact["promptPreviewDeferred"] is False
+        assert exact["errorPreviewDeferred"] is False
+        assert exact["prompt_redacted"].startswith("Prompt")
 
 
 def test_selected_trace_outside_page_keeps_redacted_bounded_preview(tmp_path):

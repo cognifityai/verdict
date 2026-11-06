@@ -296,6 +296,7 @@ def verify_retained_local_evidence(
     *,
     require_recorded_content: bool = False,
     legacy_turn_previews: Mapping[str, tuple[str | None, str | None]] | None = None,
+    automatic_turn_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Prove a rewrite or beta bootstrap extends every retained real fact."""
     if previous is None:
@@ -312,14 +313,17 @@ def verify_retained_local_evidence(
             new_turn = new_turns[old_turn.turn_id]
             if require_recorded_content and (
                 (old_turn.user_request_redacted is not None
-                 and new_turn.user_request_redacted is None)
+                 and new_turn.user_request_redacted is None
+                 and old_turn.turn_id not in automatic_turn_ids)
                 or (old_turn.final_response_redacted is not None
                     and new_turn.final_response_redacted is None)
             ):
                 raise ValueError("previously captured content is absent")
             merge_agent_turn(
                 old_turn, new_turn,
+                replace_progress=candidate.session.source_kind == "codex",
                 legacy_preview=(legacy_turn_previews or {}).get(old_turn.turn_id),
+                clear_local_request=old_turn.turn_id in automatic_turn_ids,
             )
         new_events = {
             event.event_id: event for event in candidate.events

@@ -354,6 +354,7 @@ CREATE TABLE IF NOT EXISTS agent_turns (
         'codex_turn_delta','claude_provider_response_sum')),
     request_truncated INTEGER NOT NULL DEFAULT 0 CHECK(request_truncated IN (0,1)),
     response_truncated INTEGER NOT NULL DEFAULT 0 CHECK(response_truncated IN (0,1)),
+    progress_redacted TEXT,
     PRIMARY KEY (tenant_id, run_id, turn_id),
     UNIQUE (tenant_id, run_id, sequence),
     FOREIGN KEY (tenant_id, run_id) REFERENCES agent_runs(tenant_id, run_id)
@@ -1050,6 +1051,7 @@ class SQLiteStorage:
                     "response_truncated",
                     "INTEGER NOT NULL DEFAULT 0 CHECK(response_truncated IN (0,1))",
                 ),
+                ("progress_redacted", "TEXT"),
             ):
                 if column not in agent_turn_columns:
                     self._conn.execute(f"ALTER TABLE agent_turns ADD COLUMN {column} {ddl}")
@@ -1198,6 +1200,9 @@ class SQLiteStorage:
         self,
         bundle: AgentRunBundle | AgentCaptureBatch,
         text_compatibility: _LegacyLocalTextUpgrade | None = None,
+        *,
+        replace_progress: bool = False,
+        automatic_turn_ids: frozenset[str] = frozenset(),
     ) -> None:
         bundle = normalize_bundle_timestamps(bundle)
         tenant_id = bundle.run.tenant_id
@@ -1230,6 +1235,8 @@ class SQLiteStorage:
                 merge_agent_turn(
                     current_turns.get(turn.turn_id),
                     turn,
+                    replace_progress=replace_progress,
+                    clear_local_request=turn.turn_id in automatic_turn_ids,
                     legacy_preview=(
                         text_compatibility.turn_previews.get(turn.turn_id)
                         if text_compatibility is not None else None
@@ -1316,8 +1323,9 @@ class SQLiteStorage:
                 status, user_request_redacted, final_response_redacted,
                 request_state, response_state, input_tokens, cached_input_tokens,
                 cache_write_input_tokens, output_tokens, reasoning_output_tokens,
-                total_tokens, token_usage_basis, request_truncated, response_truncated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                total_tokens, token_usage_basis, request_truncated, response_truncated,
+                progress_redacted
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(tenant_id, run_id, turn_id) DO UPDATE SET
                 ended_at=excluded.ended_at,
                 status=excluded.status,
@@ -1333,7 +1341,8 @@ class SQLiteStorage:
                 total_tokens=excluded.total_tokens,
                 token_usage_basis=excluded.token_usage_basis,
                 request_truncated=excluded.request_truncated,
-                response_truncated=excluded.response_truncated""",
+                response_truncated=excluded.response_truncated,
+                progress_redacted=excluded.progress_redacted""",
             [
                 (
                     run.tenant_id,
@@ -1356,6 +1365,7 @@ class SQLiteStorage:
                     turn.token_usage_basis,
                     int(turn.request_truncated),
                     int(turn.response_truncated),
+                    turn.progress_redacted,
                 )
                 for turn in turns
             ],
@@ -1682,6 +1692,7 @@ class SQLiteStorage:
         historical_facts: tuple[LocalRecentFact, ...] = (),
         full_projection: LocalFullProjection | None = None,
         recent_traces: tuple[Trace, ...] = (),
+        automatic_turn_ids: tuple[str, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
         prepared_recent, recent_ids = _prepare_linked_traces(
@@ -1701,6 +1712,7 @@ class SQLiteStorage:
             recent_window_json=recent_window_json,
             recent_facts=recent_facts, historical_facts=historical_facts,
             full_projection=full_projection,
+            automatic_turn_ids=automatic_turn_ids,
         )
 
     def append_agent_capture(
@@ -1724,6 +1736,7 @@ class SQLiteStorage:
         recent_facts: tuple[LocalRecentFact, ...] = (),
         historical_facts: tuple[LocalRecentFact, ...] = (),
         full_projection: LocalFullProjection | None = None,
+        automatic_turn_ids: tuple[str, ...] = (),
     ) -> None:
         window = (validate_recent_window_json(
             recent_window_json, run_id=capture.run.run_id, revision=local_revision,
@@ -1741,6 +1754,22 @@ class SQLiteStorage:
                                  historical_facts, local_revision)
         all_recent_facts = (*recent_facts, *historical_facts,
                             *(full_projection.facts if full_projection else ()))
+        automatic_ids = frozenset(automatic_turn_ids)
+        if automatic_ids and (
+            local_revision is None or capture.session.source_kind != "claude-code"
+            or any(
+                turn.user_request_redacted is not None
+                for turn in (*capture.turns,
+                             *(full_projection.tail_turns if full_projection else ()))
+                if turn.turn_id in automatic_ids
+            )
+        ):
+            raise ValueError("invalid automatic Turn reclassification")
+        automatic_trace_ids = {
+            event.trace_id
+            for event in (*capture.events, *(fact.event for fact in all_recent_facts))
+            if event.turn_id in automatic_ids and event.trace_id is not None
+        }
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1773,6 +1802,7 @@ class SQLiteStorage:
                                 text_compatibility.turn_previews
                                 if text_compatibility is not None else None
                             ),
+                            automatic_turn_ids=frozenset(automatic_turn_ids),
                         )
                     self._conn.execute(
                         "DELETE FROM agent_events WHERE tenant_id=? AND run_id=? "
@@ -1796,6 +1826,22 @@ class SQLiteStorage:
                                 (capture.run.tenant_id, capture.run.run_id,
                                  prior_limit["event_id"]),
                             )
+                if automatic_ids:
+                    prior_links = self._conn.execute(
+                        "SELECT turn_id,trace_id FROM agent_events "
+                        "WHERE tenant_id=? AND run_id=? AND trace_id IS NOT NULL "
+                        "UNION ALL SELECT turn_id,trace_id FROM local_recent_event_facts "
+                        "WHERE tenant_id=? AND run_id=? AND trace_id IS NOT NULL",
+                        (capture.run.tenant_id, capture.run.run_id,
+                         capture.run.tenant_id, capture.run.run_id),
+                    ).fetchall()
+                    projected_trace_ids = {trace.trace_id for trace in capture_traces}
+                    if any(
+                        row["turn_id"] in automatic_ids
+                        and row["trace_id"] not in projected_trace_ids
+                        for row in prior_links
+                    ):
+                        raise ValueError("local_source_reprojection_required")
                 prepared_traces = []
                 message_updates: set[str] = set()
                 for trace in capture_traces:
@@ -1803,9 +1849,19 @@ class SQLiteStorage:
                         "SELECT * FROM traces WHERE trace_id=?", (trace.trace_id,)
                     ).fetchone()
                     current = self._row_to_trace(row) if row else None
+                    if (current is not None and current.prompt_redacted is not None
+                            and trace.trace_id in automatic_trace_ids):
+                        assignment = self._conn.execute(
+                            "SELECT 1 FROM trace_cluster_assignments "
+                            "WHERE tenant_id=? AND trace_id=? LIMIT 1",
+                            (capture.run.tenant_id, trace.trace_id),
+                        ).fetchone()
+                        if current.cluster_id is not None or assignment is not None:
+                            raise ValueError("local_source_registry_conflict")
                     prepared = merge_capture_trace(
                         current,
                         trace,
+                        clear_local_request=trace.trace_id in automatic_trace_ids,
                         legacy_preview=(
                             text_compatibility.trace_previews.get(trace.trace_id)
                             if text_compatibility is not None else None
@@ -1835,7 +1891,7 @@ class SQLiteStorage:
                     if fact.event.trace_id is not None
                 }
                 for trace in prepared_traces:
-                    if trace.trace_id in recent_trace_ids:
+                    if trace.trace_id in recent_trace_ids | automatic_trace_ids:
                         self._conn.execute(
                             "INSERT INTO local_recent_trace_evidence "
                             "(trace_id,tenant_id,evidence_fingerprint) VALUES (?,?,?) "
@@ -1853,10 +1909,12 @@ class SQLiteStorage:
                     ).fetchall()
                     tenants = {row["trace_id"]: row["tenant_id"] for row in rows}
                     require_same_tenant_linked_traces(capture.run.tenant_id, linked_ids, tenants)
-                if text_compatibility is None:
-                    self._write_normalized_bundle(capture)
-                else:
-                    self._write_normalized_bundle(capture, text_compatibility)
+                self._write_normalized_bundle(
+                    capture, text_compatibility,
+                    replace_progress=(local_revision is not None
+                                      and capture.session.source_kind == "codex"),
+                    automatic_turn_ids=frozenset(automatic_turn_ids),
+                )
                 if local_revision is not None:
                     self._conn.execute(
                         "DELETE FROM local_tail_turn_facts WHERE tenant_id=? AND run_id=?",
@@ -3747,12 +3805,12 @@ class SQLiteStorage:
                     :judge_models_json, :dimensions_json, :position_swap_consistent,
                     :evaluator_provider, :evaluator_config_json,
                     :evaluator_fingerprint, :expected_dimensions_json, :status, :error,
-                    (SELECT evidence_fingerprint FROM local_recent_trace_evidence
-                     WHERE trace_id=:trace_id)
+                    :evaluated_trace_fingerprint
                 )""",
                 {
                     "judgment_id": judgment.judgment_id,
                     "trace_id": judgment.trace_id,
+                    "evaluated_trace_fingerprint": judgment.evaluated_trace_fingerprint,
                     "rubric_name": judgment.rubric_name,
                     "rubric_version": judgment.rubric_version,
                     "created_at": _iso(judgment.created_at),
@@ -3805,6 +3863,7 @@ class SQLiteStorage:
             status=JudgmentStatus(row["status"] or "completed"),
             error=row["error"],
             position_swap_consistent=None if swap is None else bool(swap),
+            evaluated_trace_fingerprint=row["local_recent_evidence_fingerprint"],
         )
 
     def list_judgments_for_cluster(
@@ -4537,6 +4596,14 @@ class SQLiteStorage:
                 expected_version_id is not None and assignment.version_id != expected_version_id
             ):
                 raise ValueError("cluster assignment tenant mismatch")
+            stale_local = self._conn.execute(
+                "SELECT 1 FROM traces t JOIN local_recent_trace_evidence r "
+                "ON r.trace_id=t.trace_id WHERE t.tenant_id=? AND t.trace_id=? "
+                "AND t.prompt_redacted IS NULL LIMIT 1",
+                (authorized_tenant, assignment.trace_id),
+            ).fetchone()
+            if stale_local is not None:
+                raise ValueError("local_source_registry_conflict")
             self._conn.execute(
                 """INSERT OR IGNORE INTO trace_cluster_assignments (
                     tenant_id,version_id,trace_id,origin,status,cluster_id,

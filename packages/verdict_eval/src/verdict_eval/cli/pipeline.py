@@ -685,11 +685,14 @@ def _run(args) -> int:
             skipped_changed += 1
             continue
         try:
+            from verdict.local_recent_facts import trace_evidence_fingerprint
+
             j = judge.judge(
                 query=current.prompt_redacted or "",
                 response=current.response_redacted or "",
                 trace_id=t.trace_id,
             )
+            j.evaluated_trace_fingerprint = trace_evidence_fingerprint(current)
             storage.insert_judgment(j)
             judged += 1
         except Exception as e:
@@ -701,6 +704,7 @@ def _run(args) -> int:
                     trace_id=t.trace_id,
                     status=JudgmentStatus.ERROR,
                     error=safe_error,
+                    evaluated_trace_fingerprint=trace_evidence_fingerprint(current),
                     **current_evaluator,
                 )
             )

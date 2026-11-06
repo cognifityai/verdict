@@ -13,15 +13,17 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from verdict.dashboard.control_plane import ControlStore
-from verdict.dashboard.evaluator_lab import _destination
+from verdict.dashboard.evaluator_lab import _destination, _uses_public_list_price
 from verdict.dashboard.scoped_evaluation import (
     _LOCK,
     _cross_process_scoped_guard,
+    _recent_progress_excerpt,
     _session_projection,
 )
 from verdict.dashboard.setup_routes import SetupRoutes
+from verdict.dashboard.spend_limit import within_static_spend_limit
 from verdict.evidence import EvidenceState, disclosed_event_attributes, event_order_key
-from verdict.pricing import compute_cost_usd
+from verdict.pricing import compute_exact_list_price_usd
 from verdict.redaction import _JSON_UNICODE_KEY_ESCAPE, _PLACEHOLDER, redact_structure
 
 _MODELS = {"anthropic": "claude-haiku-4-5", "openai": "gpt-4.1-mini"}
@@ -58,14 +60,14 @@ def _safe_call_error(exc: Exception) -> str:
     if status in {401, 403}:
         return f"Provider access was denied (HTTP {status}). Check the configured key and model permissions."
     if status == 429:
-        return "Provider rate or usage limit was reached (HTTP 429). Try later or choose another provider."
+        return "Provider rate or usage limit was reached (HTTP 429)."
     if isinstance(status, int) and 500 <= status <= 599:
-        return f"Provider service failed (HTTP {status}). Try later or choose another provider."
+        return f"Provider service failed (HTTP {status})."
     if isinstance(exc, ValueError) and str(exc) == "evidence_changed_during_explanation":
         return "Captured evidence changed during the call. Review a fresh preview."
     if isinstance(exc, ValueError) and str(exc).startswith("invalid "):
         return "The AI draft did not match the required format. No configuration changed."
-    return "The provider call or response failed. Review the destination before another approved attempt."
+    return "The provider call or response failed. This approved attempt will not repeat automatically."
 
 
 def _canonical(value: object) -> bytes:
@@ -266,6 +268,9 @@ def _context(storage, *, storage_url: str, tenant: str, config: dict[str, Any]) 
                   "runStatus": bundle.run.status.value,
                   "turns": [{"reference": f"Turn {index}", "status": turn.status.value,
                              "request": turn.user_request_redacted, "response": turn.final_response_redacted,
+                             **({"recordedProgressExcerpt": _recent_progress_excerpt(
+                                 turn.progress_redacted
+                             )} if scope == "turn" else {}),
                              "reportedTokens": turn.total_tokens}
                             for index, turn in enumerate(turns, 1)],
                   "events": [_event_row(event, index, selected=(scope == "event" and event.event_id == config["eventId"]))
@@ -357,6 +362,7 @@ def preview_explanation(storage, *, storage_url: str, tenant: str,
                     "Return only JSON with check (agent_runs, model_calls, or capture_first), "
                     "grouping (none or provider_model), intervalHours (integer 1 to 168), and why (one short sentence). "
                     "Select only an eligible check. Choose capture_first when neither is eligible. "
+                    "Use provider_model grouping only for model_calls; use none for other checks. "
                     "Never claim a saved schedule starts a worker, infer quality from counts, "
                     "or activate a policy. No raw agent content was supplied."))
     messages = [{"role": "system", "content": instruction},
@@ -367,8 +373,9 @@ def preview_explanation(storage, *, storage_url: str, tenant: str,
                                  ("sessionId", "sourceKind", "runId", "turnId", "eventId", "traceId", "spanId", "versionId", "clusterId")},
         provider, model, focus, draft_kind, binding, messages,
     ])).hexdigest()
-    estimate = compute_cost_usd(model, sum(len(item["content"].encode()) for item in messages) + 1_024, 512) if planned else None
-    return {"scope": scope, "provider": provider, "model": model, "focus": focus,
+    estimate = (compute_exact_list_price_usd(model, sum(len(item["content"].encode()) for item in messages) + 1_024, 512)
+                if planned and _uses_public_list_price(provider) else None)
+    preview = {"scope": scope, "provider": provider, "model": model, "focus": focus,
             "draftKind": draft_kind,
             "destination": destination, "promptVersion": _VERSION,
             "planFingerprint": fingerprint, "messages": messages,
@@ -377,6 +384,16 @@ def preview_explanation(storage, *, storage_url: str, tenant: str,
             and importlib.util.find_spec(provider) is not None,
             "maximumOutputTokens": 512, "upperStaticListPriceUsd": estimate,
             "externalEgressRequired": True}
+    if planned:
+        saved = _saved_explanation(ControlStore(storage_url), tenant, fingerprint)
+        if saved is not None:
+            preview["savedResult"] = saved
+    return preview
+
+
+def _saved_explanation(store: ControlStore, tenant: str, fingerprint: str) -> dict[str, Any] | None:
+    history = store.history(tenant, "evidence_explanation", fingerprint)
+    return {"resultId": fingerprint, **history[0]["payload"]} if history else None
 
 
 def run_explanation(storage, *, storage_url: str, tenant: str, config: dict[str, Any],
@@ -387,14 +404,13 @@ def run_explanation(storage, *, storage_url: str, tenant: str, config: dict[str,
         preview = preview_explanation(storage, storage_url=storage_url, tenant=tenant, config=config)
         estimate, cap = preview["upperStaticListPriceUsd"], config.get("maxEstimatedUsd")
         if (preview["plannedCalls"] != 1 or config.get("planFingerprint") != preview["planFingerprint"]
-                or estimate is None or isinstance(cap, bool) or not isinstance(cap, (int, float))
-                or not estimate <= cap <= 100):
+                or not within_static_spend_limit(estimate, cap)):
             raise ValueError("explanation preview is stale, unavailable, or over budget")
         store = ControlStore(storage_url)
         document_id = preview["planFingerprint"]
-        history = store.history(tenant, "evidence_explanation", document_id)
-        if history:
-            return {"resultId": document_id, **history[0]["payload"]}
+        saved = _saved_explanation(store, tenant, document_id)
+        if saved is not None:
+            return saved
         if provider_adapter is None and not os.environ.get(_KEYS[preview["provider"]]):
             raise ValueError("provider key is not configured")
         if provider_adapter is None and not preview["providerAvailable"]:

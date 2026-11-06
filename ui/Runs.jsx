@@ -18,10 +18,13 @@ const runTime = (value) => {
     : "time unavailable";
 };
 const findingLabel = (code) => {
+  if (code === "possible_tool_loop") return "Earlier repeated-call heuristic";
   const words = code.replaceAll("_", " ");
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
-const findingMessage = (message) => String(message || "").replace(
+const findingMessage = (message, code) => code === "possible_tool_loop"
+  ? "An earlier repeated-call heuristic flagged these events; redaction can make distinct arguments look alike."
+  : String(message || "").replace(
   /\b(\d+) (tool result|command|test execution)\(s\)/g,
   (_match, count, noun) => `${count} ${noun}${count === "1" ? "" : "s"}`,
 );
@@ -35,16 +38,23 @@ const failureRechecks = {
   business_outcome_failed: ["Inspect the reported failed outcome and its source evidence.",
     "Repeat or independently verify the outcome and record the later result before calling it recovered."],
 };
+const toolLoopReview = [
+  "Review the linked calls before acting on this earlier heuristic.",
+  "Redaction can make different arguments look identical. Compare the recorded calls and results before deciding whether any repetition occurred. This finding does not establish wasted calls or preserved quality.",
+];
 
 export function Runs({
   url, focusRunIds = [], selectedRunId: routedRunId = null,
   findingCode = null, runIdsTruncated = false, onSelectRun = null, onShowAll = null,
   sourceKind = null, agentName = null, onClearGroup = null,
-  evaluatorFingerprint = null, routedEventId = null, onOpenTrace = null,
+  evaluatorFingerprint = null, routedEventId = null, routedTurnId = null,
+  routedFollowupReview = false, onOpenTrace = null,
   recentRevision = null, recentTurnId = null, recentEventId = null,
   onOpenRecentEvent = null,
   onEvaluateTurn = null, onDraftCase = null, onOpenRelatedRun = null,
-  onBrowseRecordedGroup = null, noticeId = null, onOpenNoticeEvidence = null,
+  onBrowseRecordedGroup = null, onOpenFollowup = null,
+  onClearTurnFocus = null, onSelectEvent = null,
+  noticeId = null, onOpenNoticeEvidence = null,
 }) {
   const [state, setState] = useState({ scope: null, loading: true, error: null, data: null });
   const [selected, setSelected] = useState(null);
@@ -54,8 +64,18 @@ export function Runs({
   const [turnEvaluatorInput, setTurnEvaluatorInput] = useState("");
   const [turnEvaluatorFilter, setTurnEvaluatorFilter] = useState(null);
   const [focusEventId, setFocusEventId] = useState(null);
+  const [focusTurnId, setFocusTurnId] = useState(routedTurnId);
+  const previousRoutedRunId = useRef(routedRunId);
+  const lastScrolledTurn = useRef(null);
   const [runOffset, setRunOffset] = useState(0);
   const [notice, setNotice] = useState({ id: null, loading: false, data: null, error: null });
+  const [followups, setFollowups] = useState({ open: false, loading: false, data: null, error: null });
+  const followupRequest = useRef(0);
+  const followupScope = JSON.stringify([url, focusRunIds, sourceKind, agentName, evaluatorFingerprint]);
+  useEffect(() => {
+    followupRequest.current += 1;
+    setFollowups({ open: false, loading: false, data: null, error: null });
+  }, [followupScope]);
   const listRequest = React.useRef(0);
   const detailRequest = React.useRef(0);
   const listScope = JSON.stringify([
@@ -124,9 +144,11 @@ export function Runs({
   useEffect(() => {
     setSelected(null);
     setFocusEventId(routedEventId);
+    setFocusTurnId(routedTurnId);
     setEventOffset(0);
-    setTurnOffset(0);
-  }, [routedEventId, routedRunId, listScope]);
+    if (routedTurnId || previousRoutedRunId.current !== routedRunId) setTurnOffset(0);
+    previousRoutedRunId.current = routedRunId;
+  }, [routedEventId, routedRunId, routedTurnId, listScope]);
 
   const visibleState = state.scope === listScope
     ? state : { loading: true, error: null, data: null };
@@ -145,8 +167,14 @@ export function Runs({
     : visibleState.data?.selectedRun === undefined
       ? runs.find((run) => run.runId === selectedRunId)
       : null;
-  const linkedEventId = findingCode && selectedRun?.findings
-    .find((finding) => finding.code === findingCode)?.evidenceEventIds?.[0];
+  const linkedNotice = notice.id === noticeId && notice.data?.runId === selectedRunId
+    ? notice.data : null;
+  const noticeFindingCode = selectedRun?.findings?.find((finding) =>
+    finding.code === linkedNotice?.checkCode
+    && (!linkedNotice.eventId || finding.evidenceEventIds?.includes(linkedNotice.eventId)))?.code;
+  const selectedFindingCode = findingCode || noticeFindingCode || null;
+  const linkedEventId = selectedFindingCode && selectedRun?.findings
+    .find((finding) => finding.code === selectedFindingCode)?.evidenceEventIds?.[0];
   const effectiveFocusEventId = focusEventId === null ? linkedEventId || null : focusEventId;
   const changeRunPage = (nextOffset) => {
     setSelected(null);
@@ -165,8 +193,9 @@ export function Runs({
       data: current.data?.runId === selectedRunId ? current.data : null,
     }));
     const eventFocus = effectiveFocusEventId ? `&event_id=${encodeURIComponent(effectiveFocusEventId)}` : "";
+    const turnFocus = focusTurnId ? `&turn_id=${encodeURIComponent(focusTurnId)}` : "";
     const turnEvaluator = turnEvaluatorFilter ? `&turn_evaluator_fingerprint=${turnEvaluatorFilter}` : "";
-    fetch(`${url}/${encodeURIComponent(selectedRunId)}?event_limit=100&event_offset=${eventOffset}&turn_limit=20&turn_offset=${turnOffset}${eventFocus}${turnEvaluator}`, {
+    fetch(`${url}/${encodeURIComponent(selectedRunId)}?event_limit=100&event_offset=${eventOffset}&turn_limit=20&turn_offset=${turnOffset}${eventFocus}${turnFocus}${turnEvaluator}`, {
       credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal,
     })
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
@@ -183,7 +212,21 @@ export function Runs({
         }
       });
     return () => controller.abort();
-  }, [eventOffset, effectiveFocusEventId, selectedRun?.runId, turnOffset, turnEvaluatorFilter, url]);
+  }, [eventOffset, effectiveFocusEventId, focusTurnId, selectedRun?.runId, turnOffset, turnEvaluatorFilter, url]);
+
+  useEffect(() => {
+    if (!routedFollowupReview && focusTurnId && detail.runId === selectedRunId
+        && detail.data?.turns?.some((turn) => turn.turnId === focusTurnId)
+        && typeof document !== "undefined") {
+      const target = "verdict-focused-turn";
+      const key = `${selectedRunId}:${focusTurnId}:${target}`;
+      if (lastScrolledTurn.current !== key) {
+        document.getElementById(target)?.scrollIntoView({ block: "start" });
+        lastScrolledTurn.current = key;
+      }
+    }
+    else lastScrolledTurn.current = null;
+  }, [detail, focusTurnId, routedFollowupReview, selectedRunId]);
 
   if (visibleState.error) return <Notice icon={AlertTriangle} text={`Runs unavailable: ${visibleState.error}`} />;
   if (!visibleState.data) return <Notice icon={RefreshCw} text="Loading agent runs…" />;
@@ -194,24 +237,98 @@ export function Runs({
         ? "The requested agent run is unavailable in this tenant."
         : "No agent runs captured yet. Capture local history or an SDK Agent Run, then refresh."} />;
   }
-  const focusedFinding = findingCode && selectedRun?.findings?.find((finding) => finding.code === findingCode);
+  const loadedFollowups = followups.data?.followups || [];
+  const followupReviews = loadedFollowups.reduce((counts, item) => {
+    const status = ["correction", "ordinary", "unclear", "stale"].includes(item.reviewStatus)
+      ? item.reviewStatus : "not_reviewed";
+    counts[status] += 1;
+    return counts;
+  }, { correction: 0, ordinary: 0, unclear: 0, stale: 0, not_reviewed: 0 });
+  const followupTimes = loadedFollowups.map((item) => item.startedAt).filter(Boolean).sort();
+  const focusedFinding = selectedFindingCode && selectedRun?.findings?.find((finding) => finding.code === selectedFindingCode);
+  const toggleFollowups = () => {
+    if (followups.open) { followupRequest.current += 1; setFollowups((current) => ({ ...current, open: false })); return; }
+    const requestId = ++followupRequest.current;
+    setFollowups({ open: true, loading: true, data: null, error: null });
+    fetch(`${url}${url.includes("?") ? "&" : "?"}view=followups&limit=20`, {
+      credentials: "same-origin", headers: { Accept: "application/json" },
+    }).then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    }).then((data) => { if (requestId === followupRequest.current) setFollowups((current) => ({ ...current, loading: false, data, error: null })); })
+      .catch((error) => { if (requestId === followupRequest.current) setFollowups((current) => ({ ...current, loading: false, error: String(error) })); });
+  };
+  const loadOlderFollowups = () => {
+    if (followups.loading || !followups.data?.page?.hasMore) return;
+    const requestId = ++followupRequest.current;
+    const offset = followups.data.page.nextOffset ?? followups.data.followups.length;
+    setFollowups((current) => ({ ...current, loading: true, error: null }));
+    fetch(`${url}${url.includes("?") ? "&" : "?"}view=followups&limit=20&offset=${offset}`, {
+      credentials: "same-origin", headers: { Accept: "application/json" },
+    }).then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    }).then((data) => {
+      if (requestId !== followupRequest.current) return;
+      setFollowups((current) => {
+        const seen = new Set(current.data.followups.map((item) => `${item.runId}:${item.turnId}`));
+        const added = data.followups.filter((item) => !seen.has(`${item.runId}:${item.turnId}`));
+        return { ...current, loading: false, error: null,
+          data: { ...data, followups: [...current.data.followups, ...added],
+            page: { ...data.page, nextOffset: offset + data.page.shown } } };
+      });
+    }).catch((error) => {
+      if (requestId === followupRequest.current) {
+        setFollowups((current) => ({ ...current, loading: false, error: String(error) }));
+      }
+    });
+  };
   return (
     <div>
+      {!focusRunIds.length && !sourceKind && !agentName && !evaluatorFingerprint && <section className="border p-4 mb-4 text-sm" style={{ borderColor: color.border, background: color.panel }}>
+        <button type="button" className="underline" style={{ color: color.green }} onClick={toggleFollowups}>
+          {followups.open ? "Hide recent follow-ups" : "Review recent follow-ups"}
+        </button>
+        {followups.open && <div className="mt-3 space-y-2">
+          <p style={{ color: color.sub }}>Adjacent recorded turns are candidates for review, not a confirmed issue. Source coverage may still be partial; the evaluation preview checks that before any judge call. Open one to inspect the prior answer and optionally review it against a criterion.</p>
+          {followups.loading && <p>Loading recent follow-ups…</p>}
+          {followups.error && <p role="alert" style={{ color: color.red }}>Follow-ups unavailable: {followups.error}</p>}
+          {loadedFollowups.length > 0 && <div role="status" className="space-y-1" style={{ color: color.sub }}>
+            <p><strong>Human reviews in {loadedFollowups.length} loaded follow-ups:</strong> {`${followupReviews.correction} human-reviewed correction${followupReviews.correction === 1 ? "" : "s"}`} · {followupReviews.ordinary} ordinary · {followupReviews.unclear} unclear.</p>
+            <p>{followupReviews.stale} previous labels are stale; {followupReviews.not_reviewed} pairs are not reviewed. {followupTimes.length > 0 && <>Recorded from {runTime(followupTimes[0])} to {runTime(followupTimes.at(-1))}. </>}</p>
+            <p>These are loaded page snapshots, not an automatic failure rate or all sessions. Imports can change later pages.</p>
+          </div>}
+          {followups.data?.followups?.length === 0 && <p>No answered prior turn followed by a recorded request is available for review.</p>}
+          {followups.data?.followups?.map((item) => <button type="button" key={`${item.runId}:${item.turnId}`}
+            className="block w-full border p-3 text-left" style={{ borderColor: color.border }}
+            onClick={() => onOpenFollowup?.({ runId: item.runId, turnId: item.turnId })}>
+            <span className="block font-semibold">{item.agentName || item.sourceKind} · {runTime(item.startedAt)}</span>
+            <span className="block text-xs mt-1 break-words" style={{ color: color.sub }}>Prior answer: {item.priorResponseExcerpt || "not shown"}</span>
+            <span className="block text-xs mt-1 break-words" style={{ color: color.sub }}>Follow-up: {item.requestExcerpt || "request text unavailable"}</span>
+            <span className="block text-xs mt-1" style={{ color: color.sub }}>Human review: {{ correction: "correction", ordinary: "ordinary follow-up", unclear: "unclear", stale: "previous label stale", not_reviewed: "not reviewed" }[item.reviewStatus] || "not reviewed"}</span>
+          </button>)}
+          {followups.data?.page?.hasMore && <button type="button" disabled={followups.loading}
+            onClick={loadOlderFollowups} className="underline disabled:opacity-50" style={{ color: color.green }}>
+            {followups.loading ? "Loading older follow-ups…" : "Load older follow-ups"}
+          </button>}
+        </div>}
+      </section>}
       {noticeId && <NoticeContext notice={notice.id === noticeId ? notice : { loading: true }}
         selectedRunId={selectedRunId} onOpenEvidence={onOpenNoticeEvidence} />}
       {focusedFinding && <FocusedIssueStory run={selectedRun} finding={focusedFinding}
         detail={detail.runId === selectedRunId ? detail : { loading: true, data: null }}
-        focusEventId={effectiveFocusEventId} affectedRuns={focusRunIds.length} url={url}
+        focusEventId={effectiveFocusEventId} affectedRuns={focusRunIds.length}
+        runIdsTruncated={runIdsTruncated} url={url}
         onOpenTrace={onOpenTrace}
         onBrowseRecordedGroup={onBrowseRecordedGroup} />}
-      <details key={focusedFinding ? `finding:${findingCode}` : "run-browser"}
+      <details key={focusedFinding ? `finding:${selectedFindingCode}` : "run-browser"}
         open={focusedFinding ? undefined : true} className={focusedFinding ? "verdict-investigation-details" : "verdict-investigation-browser"}>
         <summary>{focusedFinding ? "Browse affected runs and full event details" : "Run browser"}</summary>
     <div className="grid lg:grid-cols-[360px_minmax(0,1fr)] gap-4">
       <section className={`border ${focusRunIds.length ? "order-2 lg:order-1" : "order-1"}`} style={{ borderColor: color.border, background: color.panel }}>
         {(sourceKind || agentName) && <div className="p-3 border-b text-sm flex flex-wrap justify-between gap-2" style={{ borderColor: color.border }}><span>Recorded {[sourceKind && `source: ${sourceKind}`, agentName && `agent: ${agentName}`].filter(Boolean).join(" · ")} · {page.available.toLocaleString()} runs</span><button type="button" onClick={onClearGroup} className="underline" style={{ color: color.green }}>Clear group</button></div>}
         {focusRunIds.length > 0 && <div className="p-3 border-b text-xs flex items-center justify-between gap-3" style={{ borderColor: color.amber, color: color.amber }}>
-        <span>{findingCode ? `${findingLabel(findingCode)}: showing` : "Selected run: showing"} {runs.length} of {focusRunIds.length}{runIdsTruncated ? "+" : ""} {findingCode ? "affected runs" : "runs"}{visibleState.data?.filter?.complete === false ? " (some are unavailable in this tenant)" : ""}.</span>
+        <span>{selectedFindingCode ? `${findingLabel(selectedFindingCode)}: showing` : "Selected run: showing"} {runs.length} of {focusRunIds.length} {selectedFindingCode ? "linked affected runs" : "runs"}{runIdsTruncated ? "; more affected runs are not linked here" : ""}{visibleState.data?.filter?.complete === false ? " (some are unavailable in this tenant)" : ""}.</span>
           <button className="underline shrink-0" onClick={() => { setRunOffset(0); onShowAll?.(); }}>Show all runs</button>
         </div>}
         <div className="p-4 border-b flex items-center justify-between" style={{ borderColor: color.border }}>
@@ -246,7 +363,7 @@ export function Runs({
           <button disabled={visibleState.loading || !page.truncated} onClick={() => changeRunPage(page.offset + page.limit)} className="border px-3 py-1">Next</button>
         </div>}
       </section>
-      <RunDetail url={url} run={selectedRun} detail={detail.runId === selectedRunId ? detail : { loading: true, error: null, data: null }} findingCode={findingCode} prioritizeDetail={focusRunIds.length > 0} otherAgentRunsVisible={runs.some((item) => item.runId !== selectedRunId && item.agentName && item.agentName !== selectedRun?.agentName)} onEventPage={(offset) => { setFocusEventId(""); setEventOffset(offset); }} onTurnPage={setTurnOffset} onFocusEvent={(eventId) => { setFocusEventId(eventId); setEventOffset(0); }} focusEventId={effectiveFocusEventId} onOpenTrace={onOpenTrace} onEvaluateTurn={onEvaluateTurn} onDraftCase={onDraftCase} onOpenRelatedRun={onOpenRelatedRun} onBrowseRecordedGroup={onBrowseRecordedGroup} turnEvaluatorInput={turnEvaluatorInput} onTurnEvaluatorInput={setTurnEvaluatorInput} turnEvaluatorFilter={turnEvaluatorFilter} onTurnEvaluatorFilter={setTurnEvaluatorFilter} recentReference={recentRevision && recentTurnId && recentEventId ? { revision: recentRevision, turnId: recentTurnId, eventId: recentEventId } : null} onOpenRecentEvent={onOpenRecentEvent} />
+      <RunDetail key={selectedRunId} url={url} run={selectedRun} detail={detail.runId === selectedRunId ? detail : { loading: true, error: null, data: null }} findingCode={selectedFindingCode} prioritizeDetail={focusRunIds.length > 0} otherAgentRunsVisible={runs.some((item) => item.runId !== selectedRunId && item.agentName && item.agentName !== selectedRun?.agentName)} onEventPage={(offset) => { setFocusEventId(""); setEventOffset(offset); }} onTurnPage={(offset) => { setFocusTurnId(null); setTurnOffset(offset); onClearTurnFocus?.(); }} onFocusEvent={(eventId) => { setFocusTurnId(null); setFocusEventId(eventId); setEventOffset(0); onSelectEvent?.(eventId); }} focusEventId={effectiveFocusEventId} focusTurnId={focusTurnId} followupReview={routedFollowupReview} onOpenTrace={onOpenTrace} onEvaluateTurn={onEvaluateTurn} onDraftCase={onDraftCase} onOpenRelatedRun={onOpenRelatedRun} onBrowseRecordedGroup={onBrowseRecordedGroup} turnEvaluatorInput={turnEvaluatorInput} onTurnEvaluatorInput={setTurnEvaluatorInput} turnEvaluatorFilter={turnEvaluatorFilter} onTurnEvaluatorFilter={setTurnEvaluatorFilter} recentReference={recentRevision && recentTurnId && recentEventId ? { revision: recentRevision, turnId: recentTurnId, eventId: recentEventId } : null} onOpenRecentEvent={onOpenRecentEvent} />
     </div>
       </details>
     </div>
@@ -275,45 +392,51 @@ function NoticeContext({ notice, selectedRunId, onOpenEvidence }) {
   </section>;
 }
 
-function FocusedIssueStory({ run, finding, detail, focusEventId, affectedRuns, url, onOpenTrace, onBrowseRecordedGroup }) {
+function FocusedIssueStory({ run, finding, detail, focusEventId, affectedRuns, runIdsTruncated, url, onOpenTrace, onBrowseRecordedGroup }) {
+  const sourceGap = finding.code === "source_capture_partial";
   const event = detail.data?.events?.find((item) => item.eventId === focusEventId);
   const linkedEvents = finding.evidenceEventIds || [];
   const recommendation = (run.recommendations || []).find((item) =>
     item.evidenceEventIds?.some((eventId) => linkedEvents.includes(eventId)));
   const recheck = failureRechecks[finding.code];
+  const loopReview = finding.code === "possible_tool_loop" && !recommendation ? toolLoopReview : null;
+  const feedbackReview = finding.code === "negative_feedback_recorded"
+    ? "Inspect the linked rating and recorded turn. Ask what prompted the rating before changing the workflow."
+    : null;
   return <div className="verdict-issue-story">
     <div className="verdict-issue-story-main">
       <section className="verdict-issue-story-card">
-        <span className="verdict-issue-story-label">{finding.severity === "error" ? "RECORDED FAILURE" : "RECORDED FINDING"}</span>
+        <span className="verdict-issue-story-label">{sourceGap ? "EVIDENCE GAP" : finding.severity === "error" ? "RECORDED FAILURE" : "RECORDED FINDING"}</span>
         <div className="verdict-issue-story-head"><h2>What happened</h2><span>{run.sourceKind} · {runTime(run.startedAt)}</span></div>
-        <p>{findingMessage(finding.message)}</p>
+        <p>{findingMessage(finding.message, finding.code)}</p>
         <div className="verdict-issue-story-facts">
           <div><b>RUN</b><span>{run.agentName || run.sourceKind} · {run.turnCount} {run.sourcePartial ? "recorded prefix turns" : run.turnCount === 1 ? "turn" : "turns"} · {run.eventCount} {run.sourcePartial ? "recorded prefix events" : run.eventCount === 1 ? "event" : "events"}</span></div>
-          <div><b>EVENT</b><span>{event ? `#${event.timelineIndex + 1} · ${event.type.replaceAll("_", " ")} · ${event.status}` : detail.loading ? "Loading linked evidence…" : linkedEvents.length ? "Linked event unavailable in this run" : "No event-level evidence recorded"}</span></div>
-          {affectedRuns > 1 && <div><b>SCOPE</b><span>{affectedRuns} affected runs · this run is shown first</span></div>}
+          <div><b>EVENT</b><span>{event ? `#${event.timelineIndex + 1} · ${event.type.replaceAll("_", " ")} · ${event.status}` : sourceGap ? "No event-level evidence recorded for this coverage gap" : detail.loading ? "Loading linked evidence…" : linkedEvents.length ? "Linked event unavailable in this run" : "No event-level evidence recorded"}</span></div>
+          {(affectedRuns > 1 || runIdsTruncated) && <div><b>SCOPE</b><span>{runIdsTruncated ? `${affectedRuns} linked runs · additional affected runs are not linked here` : `${affectedRuns} affected runs`} · this run is shown first</span></div>}
         </div>
       </section>
       <section className="verdict-issue-story-card">
         <h2>Recorded evidence</h2>
         {event ? <EventRow event={event} root={url.replace(/\/api\/runs$/, "")}
           runId={run.runId} focused idPrefix="lead-" onOpenTrace={onOpenTrace} />
-          : <p>{detail.loading ? "Loading the linked event…" : "The linked event is unavailable here. Open the full run details to review what was captured."}</p>}
-        <small>Verdict has not inferred a cause or a later recovery from this event.</small>
+          : <p>{sourceGap ? "The stored history is incomplete. Open the run details to inspect the retained prefix and its coverage." : detail.loading ? "Loading the linked event…" : "The linked event is unavailable here. Open the full run details to review what was captured."}</p>}
+        {!sourceGap && <small>Verdict has not inferred a cause or a later recovery from this event.</small>}
       </section>
     </div>
     <aside className="verdict-issue-story-aside">
       <section className="verdict-issue-story-card">
         <h2>Suggested next action</h2>
-        <p>{recommendation?.action || recheck?.[0] || "Inspect the recorded evidence before deciding what to change."}</p>
+        <p>{sourceGap ? "Review source coverage and the retained prefix before deciding whether to recapture or instrument missing activity." : recommendation?.action || recheck?.[0] || loopReview?.[0] || feedbackReview || "Inspect the recorded evidence before deciding what to change."}</p>
         {recommendation?.tradeoff && <small>{recommendation.tradeoff}</small>}
+        {loopReview && <small>{loopReview[1]}</small>}
         {recheck && <><h3>After the fix</h3><p>{recheck[1]}</p></>}
         {onBrowseRecordedGroup && run.sourceKind && <><button type="button" className="underline text-sm mt-3 text-left" style={{ color: color.green }} onClick={() => onBrowseRecordedGroup({ sourceKind: run.sourceKind, agentName: run.agentName || null })}>{`Compare runs with the same recorded ${run.agentName ? "source and agent" : "source"} →`}</button><small>Matching labels help find other runs; they do not establish a shared cause or task.</small></>}
       </section>
-      <section className="verdict-issue-story-card">
+      {!sourceGap && <section className="verdict-issue-story-card">
         <h2>Need deeper analysis?</h2>
         <p>Review the captured event or ask for an optional AI explanation after checking its evidence and cost.</p>
         <EvidenceExplain root={url.replace(/\/api\/runs$/, "")} scope="run" runId={run.runId} />
-      </section>
+      </section>}
     </aside>
   </div>;
 }
@@ -583,7 +706,7 @@ function RecentLocalEvents({ url, runId, recentReference = null, onOpenRecentEve
   </section>;
 }
 
-function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, otherAgentRunsVisible = false, onEventPage, onTurnPage, onFocusEvent, focusEventId, onOpenTrace, onEvaluateTurn, onDraftCase, onOpenRelatedRun, onBrowseRecordedGroup, turnEvaluatorInput, onTurnEvaluatorInput, turnEvaluatorFilter, onTurnEvaluatorFilter, recentReference = null, onOpenRecentEvent = null }) {
+function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, otherAgentRunsVisible = false, onEventPage, onTurnPage, onFocusEvent, focusEventId, focusTurnId, followupReview = false, onOpenTrace, onEvaluateTurn, onDraftCase, onOpenRelatedRun, onBrowseRecordedGroup, turnEvaluatorInput, onTurnEvaluatorInput, turnEvaluatorFilter, onTurnEvaluatorFilter, recentReference = null, onOpenRecentEvent = null }) {
   if (!run) return null;
   const metrics = run.metrics || {};
   const sourceUsage = run.sourceTokenUsage || { totalTokens: null, state: "not_captured" };
@@ -604,6 +727,7 @@ function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, ot
   const selectedEvent = focusEventId ? detail.data?.events?.find((event) => event.eventId === focusEventId) : null;
   const linkedEvidenceIds = (run.findings.find((finding) => finding.evidenceEventIds?.includes(focusEventId)) || focusedFinding)?.evidenceEventIds || [];
   const selectedEvidenceIndex = linkedEvidenceIds.indexOf(focusEventId);
+  const focusedSequence = detail.data?.turns?.find((turn) => turn.turnId === focusTurnId)?.sequence;
   return (
     <section className={`border p-5 min-w-0 ${prioritizeDetail ? "order-1 lg:order-2" : "order-2"}`} style={{ borderColor: color.border, background: color.panel }}>
       <div className="flex flex-wrap justify-between gap-3">
@@ -646,7 +770,7 @@ function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, ot
             <button key={`${finding.code}-${index}`} disabled={!finding.evidenceEventIds?.length} onClick={() => onFocusEvent(finding.evidenceEventIds[0])} className="border p-3 text-sm text-left w-full" style={{ borderColor: finding === focusedFinding ? color.amber : color.border }}>
               <span className="text-xs" style={{ color: finding.severity === "error" ? color.red : finding.severity === "warning" ? color.amber : color.sub }}>{findingLabel(finding.code)}</span>
               {finding.scope === "historical_prefix" && <span className="block text-xs mt-1" style={{ color: color.amber }}>Observed in captured historical prefix</span>}
-              <div className="mt-1">{findingMessage(finding.message)}</div>
+              <div className="mt-1">{findingMessage(finding.message, finding.code)}</div>
               <div className="text-xs mt-1" style={{ color: color.faint }}>{finding.evidenceEventIds?.length ? `Inspect ${finding.evidenceEventIds.length} linked evidence ${finding.evidenceEventIds.length === 1 ? "event" : "events"}` : "No event-level evidence is available for this finding."}</div>
             </button>
           )) : terminalFailure ? <div className="border p-3 text-sm" style={{ borderColor: color.amber }}>
@@ -662,8 +786,8 @@ function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, ot
             <div className="text-xs mt-1" style={{ color: color.sub }}>{item.rationale} Tradeoff: {item.tradeoff}</div>
             {item.evidenceEventIds?.length > 0 && <button type="button" className="underline text-xs mt-2" onClick={() => onFocusEvent(item.evidenceEventIds[0])}>Inspect recorded evidence</button>}
           </div>) : focusedFinding?.code === "possible_tool_loop" ? <div className="border p-3 text-sm" style={{ borderColor: color.border }}>
-            <div className="font-semibold">Inspect the repeated calls and their results before changing the workflow.</div>
-            <p className="text-xs mt-1" style={{ color: color.sub }}>The same tool and arguments were recorded repeatedly within a turn. Review the linked events to see whether retries or repeated reads were necessary. If you change the workflow, compare it against the same task checks; this finding does not establish wasted calls or preserved quality.</p>
+            <div className="font-semibold">{toolLoopReview[0]}</div>
+            <p className="text-xs mt-1" style={{ color: color.sub }}>{toolLoopReview[1]}</p>
             {focusedFinding.evidenceEventIds?.length > 0 && <button type="button" className="underline text-xs mt-2" onClick={() => onFocusEvent(focusedFinding.evidenceEventIds[0])}>Inspect recorded evidence</button>}
           </div> : focusedFinding && failureRechecks[focusedFinding.code] && focusedFinding.evidenceEventIds?.length ? <div className="border p-3 text-sm" style={{ borderColor: color.border }}>
             <div className="font-semibold">{failureRechecks[focusedFinding.code][0]}</div>
@@ -684,7 +808,7 @@ function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, ot
             : <p role="status" className="text-sm" style={{ color: detail.loading ? color.sub : color.amber }}>{detail.loading ? "Loading linked evidence…" : "The selected evidence event is unavailable in this run."}</p>}
         </div>}
         {otherFindings.length > 0 && <details className="mt-5 border p-3" style={{ borderColor: color.border }}><summary className="cursor-pointer text-sm">Other recorded findings ({otherFindings.length})</summary>
-          <div className="mt-3 space-y-2">{otherFindings.map((finding, index) => <button key={`${finding.code}-${index}`} type="button" disabled={!finding.evidenceEventIds?.length} onClick={() => onFocusEvent(finding.evidenceEventIds[0])} className="w-full border p-3 text-left text-sm" style={{ borderColor: color.border }}>{findingLabel(finding.code)} · {findingMessage(finding.message)}</button>)}</div>
+          <div className="mt-3 space-y-2">{otherFindings.map((finding, index) => <button key={`${finding.code}-${index}`} type="button" disabled={!finding.evidenceEventIds?.length} onClick={() => onFocusEvent(finding.evidenceEventIds[0])} className="w-full border p-3 text-left text-sm" style={{ borderColor: color.border }}>{findingLabel(finding.code)} · {findingMessage(finding.message, finding.code)}</button>)}</div>
         </details>}
       </section>
       </PrefixShell>
@@ -715,25 +839,30 @@ function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, ot
           onDraftCase({ runId: run.runId, turnId: turn?.turnId || null, request: turn?.request || "", complete: Boolean(turn) });
         }}>Draft a reviewed case from this run…</button>}
       </details>
-      <details className="mt-6" defaultOpen={!focusedFinding}>
+      <details className="mt-6" open={focusTurnId ? true : undefined} defaultOpen={!focusedFinding}>
         <summary className="cursor-pointer font-semibold">Turns and full event timeline</summary>
       <h2 className="font-semibold mt-6">Turns</h2>
       <div className="text-xs mt-1" style={{ color: color.sub }}>{turnEvaluatorFilter ? "Showing only this exact Turn evaluator." : `Showing the latest valid current Turn result among the ${detail.data?.turnEvaluationScope?.maxEvaluatorsPerTurn || 8} newest evaluator slots per Turn, if any. Older results require an exact evaluator fingerprint. Trace evaluator coverage above is separate.`}</div>
       <div className="flex flex-wrap gap-2 mt-2 items-center text-xs"><input aria-label="Exact Turn evaluator fingerprint" placeholder="Exact 64-character evaluator fingerprint" value={turnEvaluatorInput} onChange={(event) => onTurnEvaluatorInput(event.target.value)} className="border p-2 bg-transparent min-w-[200px] flex-1 font-mono" /><button className="border px-3 py-2" disabled={!/^[0-9a-f]{64}$/.test(turnEvaluatorInput)} onClick={() => onTurnEvaluatorFilter(turnEvaluatorInput)}>Show exact evaluator</button><button className="border px-3 py-2" disabled={!turnEvaluatorFilter} onClick={() => { onTurnEvaluatorInput(""); onTurnEvaluatorFilter(null); }}>Show latest</button></div>
       <div className="mt-2 space-y-2">
         {(detail.data?.turns || []).map((turn) => (
-          <details key={turn.turnId} className="border p-3" style={{ borderColor: color.border }}>
+          <details key={`${turn.turnId}:${focusTurnId === turn.turnId || (!followupReview && turn.sequence === focusedSequence - 1)}`} id={focusTurnId === turn.turnId ? "verdict-focused-turn" : undefined} open={focusTurnId === turn.turnId || (!followupReview && turn.sequence === focusedSequence - 1) ? true : undefined} className="border p-3" style={{ borderColor: color.border }}>
             <summary className="text-sm cursor-pointer">Turn {turn.sequence + 1} · {turn.status}</summary>
+            {turn.sequence > 0 && <FollowupReview root={url.replace(/\/api\/runs$/, "")} runId={run.runId} turnId={turn.turnId}
+              autoOpen={followupReview && focusTurnId === turn.turnId} />}
             <div className="mt-3 text-xs" style={{ color: color.sub }}>
               <div>Request ({turn.requestState}{turn.requestTruncated ? ", bounded preview" : ""}): {turn.request ?? "not available"}</div>
               <div className="mt-2">Response ({turn.responseState}{turn.responseTruncated ? ", bounded preview" : ""}): {turn.response ?? "not available"}</div>
+              <div className="mt-2" style={{ whiteSpace: "pre-wrap" }}>Recorded progress ({turn.progress == null ? "not captured for this turn" : !turn.progress ? "empty recorded field" : run.sourceKind === "codex" ? "latest 12 messages, earlier omissions marked, bounded to 4 KB" : run.sourceKind === "verdict_sdk" ? "supplied by application, bounded to 4 KB" : "source supplied, bounded to 4 KB"}): {turn.progress || "—"}</div>
+              <div className="mt-1">These source records do not prove the user saw an update or that no other update occurred.</div>
               <div className="mt-2">Source-reported token usage: {turnTokenSummary(turn.tokenUsage)}</div>
               <div className="mt-2">{turnEvaluatorFilter ? "Exact Turn evaluation" : "Latest valid current Turn evaluation (bounded)"}: {turn.evaluation ? `${turn.evaluation.status} · ${turn.evaluation.rubricName}/${turn.evaluation.rubricVersion} · ${turn.evaluation.judgeModels?.join(", ")} · ${turn.evaluation.toolEvidence === "counts_v1" ? "recorded tool counts included" : "tool counts not included in this judgment"} · evaluator ${turn.evaluation.evaluatorFingerprint} · ${turn.evaluation.dimensions.map((d) => `${d.name}: ${d.verdict}`).join(" · ") || "no scores"}` : "No current native Turn result for this scope"}</div>
               {turn.evaluation?.toolEvidence === "counts_v1" && turn.evaluation.toolCounts && <div className="text-xs mt-1" style={{ color: color.sub }}>Recorded tool events: {turn.evaluation.toolCounts.calls} calls · {turn.evaluation.toolCounts.results} results · {turn.evaluation.toolCounts.errorResults} reported errors · {turn.evaluation.toolCounts.unknownResults} unknown outcomes. Direct dispatch origins: {turn.evaluation.toolCounts.mcpCalls} MCP · {turn.evaluation.toolCounts.applicationCalls} application · {turn.evaluation.toolCounts.providerHostedCalls} provider-hosted · {turn.evaluation.toolCounts.originNotCapturedCalls} not captured · {turn.evaluation.toolCounts.originUnusableCalls} unusable. Origin labels describe only the producer-recorded outer dispatch boundary; they do not verify unobserved downstream services, protocols, sources, or claims.</div>}
             </div>
             <TurnAnalysis key={`${run.runId}:${turn.turnId}`} url={url} runId={run.runId} turnId={turn.turnId} onFocusEvent={onFocusEvent} />
             <EvidenceExplain root={url.replace(/\/api\/runs$/, "")} scope="turn" runId={run.runId} turnId={turn.turnId} />
-            {onEvaluateTurn && <button type="button" className="border px-3 py-2 mt-2 text-xs" onClick={() => onEvaluateTurn(run.runId, turn.turnId)}>Evaluate this turn…</button>}
+            {turn.sequence > 0 && <ScopedEvaluate root={url.replace(/\/api\/runs$/, "")} scope="turn_window" runId={run.runId} turnId={turn.turnId} />}
+            {onEvaluateTurn && <button type="button" className="border px-3 py-2 mt-2 text-xs" onClick={() => onEvaluateTurn(run.runId, turn.turnId)}>Evaluate this turn in Lab…</button>}
           </details>
         ))}
         {detail.data?.turnPage && <div className="flex items-center justify-between gap-2 text-xs" style={{ color: color.sub }}><span>Showing {detail.data.turnPage.shown ? detail.data.turnPage.offset + 1 : 0}-{detail.data.turnPage.offset + detail.data.turnPage.shown} of {detail.data.turnPage.available} turns.</span><span className="flex gap-2"><button disabled={detail.data.turnPage.offset === 0} onClick={() => onTurnPage(Math.max(0, detail.data.turnPage.offset - detail.data.turnPage.limit))} className="border px-3 py-1">Previous</button><button disabled={!detail.data.turnPage.truncated} onClick={() => onTurnPage(detail.data.turnPage.offset + detail.data.turnPage.limit)} className="border px-3 py-1">Next</button></span></div>}
@@ -752,6 +881,82 @@ function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, ot
       </details>
     </section>
   );
+}
+
+export function FollowupReview({ root, runId, turnId, autoOpen = false }) {
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState({ loading: false, saving: false, data: null, error: null });
+  const request = useRef(0);
+  const reviewAnchor = useRef(null);
+  const scrolledPair = useRef(null);
+  const endpoint = `${root}/api/runs/${encodeURIComponent(runId)}/followup-review/${encodeURIComponent(turnId)}`;
+  const load = async () => {
+    const id = ++request.current;
+    setView({ pairKey: endpoint, loading: true, saving: false, data: null, error: null });
+    try {
+      const response = await fetch(endpoint, { credentials: "same-origin" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      if (id === request.current) setView({ pairKey: endpoint, loading: false, saving: false, data, error: null });
+    } catch (error) {
+      if (id === request.current) setView({ pairKey: endpoint, loading: false, saving: false, data: null, error: String(error) });
+    }
+  };
+  const save = async (label) => {
+    const id = ++request.current;
+    setView((current) => ({ ...current, saving: true, error: null }));
+    try {
+      const tokenResponse = await fetch(`${root}/api/setup/token`, { credentials: "same-origin" });
+      if (!tokenResponse.ok) throw new Error(`HTTP ${tokenResponse.status}`);
+      const token = (await tokenResponse.json()).setupToken;
+      const response = await fetch(endpoint, { method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Verdict-Setup": token },
+        body: JSON.stringify({ label, evidenceFingerprint: view.data.evidenceFingerprint,
+          expectedRevision: view.data.revision }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      if (id === request.current) setView({ pairKey: endpoint, loading: false, saving: false, data, error: null });
+    } catch (error) {
+      if (id === request.current) setView((current) => ({ ...current, saving: false, error: String(error) }));
+    }
+  };
+  useEffect(() => {
+    if (autoOpen) { setOpen(true); void load(); }
+    else setOpen(false);
+    return () => { request.current += 1; };
+  }, [autoOpen, root, runId, turnId]);
+  useEffect(() => {
+    if (!autoOpen) { scrolledPair.current = null; return; }
+    if (open && !view.loading && view.pairKey === endpoint && (view.data || view.error)
+        && scrolledPair.current !== endpoint && reviewAnchor.current) {
+      reviewAnchor.current.scrollIntoView({ block: "start" });
+      scrolledPair.current = endpoint;
+    }
+  }, [autoOpen, endpoint, open, view]);
+  return <div ref={reviewAnchor} id={autoOpen ? "verdict-followup-review" : undefined} className="mt-3 text-xs">
+    <button type="button" className="border px-3 py-2" onClick={() => {
+      if (open) { request.current += 1; setOpen(false); }
+      else { setOpen(true); void load(); }
+    }}>{open ? "Hide follow-up review" : "Review this follow-up locally…"}</button>
+    {open && <div className="border p-3 mt-2 space-y-2" style={{ borderColor: color.border }}>
+      <p style={{ color: color.sub }}>Your label, based on the recorded pair. It is not an automatic agent failure or a judge result. Source coverage outside these texts may be partial.</p>
+      {view.loading && <p>Loading recorded pair…</p>}
+      {view.error && <p role="alert" style={{ color: color.red }}>{view.error} <button type="button" className="underline" onClick={() => void load()}>Reload pair</button></p>}
+      {view.data && <>
+        <div tabIndex={0} className="max-h-56 overflow-auto whitespace-pre-wrap break-words space-y-2" aria-label="Recorded follow-up pair">
+          <p>Prior request: {view.data.priorRequest}</p>
+          <p>Prior answer: {view.data.priorAnswer}</p>
+          <p>Later request: {view.data.laterRequest}</p>
+        </div>
+        {view.data.stale && <p role="status" style={{ color: color.amber }}>The recorded pair changed. Its previous label is stale; review the current text before labeling again.</p>}
+        {view.data.label && <p role="status">Your saved label: {view.data.label === "ordinary" ? "ordinary follow-up" : view.data.label}</p>}
+        <div className="flex flex-wrap gap-2">
+          {[["correction", "Correction"], ["ordinary", "Ordinary follow-up"], ["unclear", "Unclear"]].map(([value, label]) =>
+            <button type="button" key={value} disabled={view.saving} className="border px-3 py-2 disabled:opacity-50" onClick={() => void save(value)}>{label}</button>)}
+        </div>
+      </>}
+    </div>}
+  </div>;
 }
 
 export function TurnAnalysis({ url, runId, turnId, onFocusEvent }) {
@@ -834,7 +1039,7 @@ function EventRow({ event, root, runId, focused = false, onOpenTrace = null, idP
         <span className="ml-auto text-xs font-mono" style={{ color: color.faint }}>{event.occurredAt}</span>
       </summary>
       <div className="mt-3 grid gap-2 text-xs">
-        <div style={{ color: color.sub }}>For a later-pass attachment in Monitoring, select these exact IDs:</div>
+        <div style={{ color: color.sub }}>Evidence IDs</div>
         <div className="font-mono break-all select-all">Run ID {runId}</div>
         <div className="font-mono break-all select-all">Event ID {event.eventId}</div>
         <div style={{ color: color.faint }}>Source: {event.provenance} · privacy: {event.privacy}</div>

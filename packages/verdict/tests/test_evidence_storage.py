@@ -106,6 +106,47 @@ def _linked_capture() -> tuple[AgentRunBundle, Trace]:
     return replace(bundle, events=(event,)), trace
 
 
+def test_agent_progress_is_redacted_before_sqlite_persistence(tmp_path):
+    database = tmp_path / "progress.db"
+    storage = SQLiteStorage(str(database))
+    bundle = _bundle()
+    unsafe = replace(
+        bundle,
+        turns=(replace(bundle.turns[0], progress_redacted="10:00 canary@example.invalid done"),),
+    )
+    try:
+        AgentCaptureService(storage).capture(unsafe)
+        [loaded] = storage.list_agent_run_bundles("tenant-a")
+        assert loaded.turns[0].progress_redacted == "10:00 <EMAIL> done"
+        with sqlite3.connect(database) as connection:
+            [(persisted,)] = connection.execute(
+                "SELECT progress_redacted FROM agent_turns WHERE tenant_id=?",
+                ("tenant-a",),
+            )
+        assert persisted == "10:00 <EMAIL> done"
+    finally:
+        storage.close()
+
+
+def test_agent_progress_expansion_fails_closed_without_losing_run(tmp_path):
+    database = tmp_path / "expanded-progress.db"
+    storage = SQLiteStorage(str(database))
+    bundle = _bundle()
+    progress = "a@b.c " * 600
+    assert len(progress.encode()) < 4_096
+    expanded = replace(
+        bundle,
+        turns=(replace(bundle.turns[0], progress_redacted=progress),),
+    )
+    try:
+        AgentCaptureService(storage).capture(expanded)
+        AgentCaptureService(storage).capture(expanded)
+        [loaded] = storage.list_agent_run_bundles("tenant-a")
+        assert loaded.turns[0].progress_redacted == "<REDACTED>"
+    finally:
+        storage.close()
+
+
 @pytest.fixture(params=["memory", "sqlite", "buffered"])
 def evidence_storage(request: pytest.FixtureRequest, tmp_path):
     if request.param == "memory":

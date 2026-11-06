@@ -386,6 +386,7 @@ class AgentTurn:
     token_usage_basis: str | None = None
     request_truncated: bool = False
     response_truncated: bool = False
+    progress_redacted: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("turn_id", "run_id"):
@@ -420,6 +421,14 @@ class AgentTurn:
                         raise ValueError(f"{content_name} must be bounded")
                 except UnicodeError as exc:
                     raise ValueError(f"{content_name} must be valid UTF-8") from exc
+        if self.progress_redacted is not None:
+            if not isinstance(self.progress_redacted, str):
+                raise ValueError("progress_redacted must be text")
+            try:
+                if len(self.progress_redacted.encode("utf-8")) > 4_096:
+                    raise ValueError("progress_redacted must be bounded")
+            except UnicodeError as exc:
+                raise ValueError("progress_redacted must be valid UTF-8") from exc
         for name in _TURN_TOKEN_FIELDS:
             value = getattr(self, name)
             if value is not None and (
@@ -808,6 +817,7 @@ def _agent_capture_from_json(
         "token_usage_basis",
         "request_truncated",
         "response_truncated",
+        "progress_redacted",
     }
     event_fields = {
         "event_id",
@@ -884,6 +894,7 @@ def _agent_capture_from_json(
                 token_usage_basis=item.get("token_usage_basis"),
                 request_truncated=item.get("request_truncated", False),
                 response_truncated=item.get("response_truncated", False),
+                progress_redacted=item.get("progress_redacted"),
             )
             for item in turn_data
             if isinstance(item, dict)

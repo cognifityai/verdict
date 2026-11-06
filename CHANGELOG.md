@@ -6,6 +6,43 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0b6] - 2026-11-06
+
+### Added
+
+- Source-aware Home actions connect capture coverage, recorded issues and usage
+  to reviewed local checks and exact run evidence. Call-only stores can inspect
+  captured calls without activating a model-call monitor.
+- Optional adjacent-turn review and selected-turn evaluation show bounded
+  recorded evidence separately from human labels and judge opinions. Paid
+  dashboard actions require an approved static list-price limit; unknown-priced
+  destinations cannot use those actions.
+- Groups shows explicitly application-reported boolean outcomes with missing
+  and conflicting reports retained as coverage states.
+
+### Changed
+
+- Monitoring distinguishes the latest check from the latest recurring worker
+  check on the current schedule revision. New guided plans leave consumption
+  of approved judge jobs off until explicitly enabled.
+- Home, Monitoring and Investigation are the primary navigation path. Saved
+  change notes remain read-only; intended-change before/after comparison is
+  unavailable. Existing saved-case experiments remain separate.
+- Long unselected model-call text and text-dependent facts are deferred until
+  the exact call is selected. Optional AI explanations reopen saved outcomes
+  and distinguish returned model advice from verified recorded facts.
+
+### Fixed
+
+- Preserve Codex rolling progress through verified append imports across memory,
+  buffered memory, SQLite and PostgreSQL. Claude source-marked non-human requests
+  no longer appear as human follow-ups; incompatible registry assignments block
+  reclassification instead of silently rewriting their evidence.
+- Preserve the evaluated Trace fingerprint through durable judgment reads and
+  subsequent writes, including legacy records without an evidence binding.
+- Reject oversized integer spending limits as invalid input without numeric
+  conversion errors or provider calls.
+
 ## [0.1.0b5] - 2026-11-01
 
 ### Fixed
@@ -1004,7 +1041,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b5...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b6...HEAD
+[0.1.0b6]: https://github.com/cognifityai/verdict/compare/v0.1.0b5...v0.1.0b6
 [0.1.0b5]: https://github.com/cognifityai/verdict/compare/v0.1.0b4...v0.1.0b5
 [0.1.0b4]: https://github.com/cognifityai/verdict/compare/v0.1.0b3...v0.1.0b4
 [0.1.0b3]: https://github.com/cognifityai/verdict/compare/v0.1.0b2...v0.1.0b3

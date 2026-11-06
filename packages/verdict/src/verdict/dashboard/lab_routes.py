@@ -174,14 +174,31 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
         try:
             writable = setup.writable_storage()
             if payload.get("unit") == "conversation":
-                from verdict_eval.conversation_judge import execute_evaluation
+                from verdict_eval.conversation_judge import execute_evaluation, preview_evaluation
+
+                from verdict.dashboard.spend_limit import within_static_spend_limit
+
+                config = {key: value for key, value in payload.items()
+                          if key not in {"unit", "maxEstimatedUsd"}}
+                preview = preview_evaluation(writable, tenant_id=setup.tenant_id, config=config)
+                if not within_static_spend_limit(
+                    preview["upperStaticListPriceUsd"], payload.get("maxEstimatedUsd")
+                ):
+                    raise ValueError("conversation evaluation exceeds estimated-spend limit")
 
                 return execute_evaluation(
                     writable, tenant_id=setup.tenant_id,
-                    config={key: value for key, value in payload.items() if key != "unit"},
+                    config=config,
                     confirm_external_egress=payload.get("confirmExternalEgress") is True,
                 )
-            from verdict.dashboard.evaluator_lab import execute_evaluation
+            from verdict.dashboard.evaluator_lab import execute_evaluation, preview_evaluation
+            from verdict.dashboard.spend_limit import within_static_spend_limit
+
+            preview = preview_evaluation(writable, tenant_id=setup.tenant_id, config=payload)
+            if not within_static_spend_limit(
+                preview["upperStaticListPriceUsd"], payload.get("maxEstimatedUsd")
+            ):
+                raise ValueError("evaluation exceeds estimated-spend limit")
 
             return execute_evaluation(
                 writable,
@@ -228,11 +245,17 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             )
         writable = None
         try:
-            from verdict.dashboard.evaluator_lab import execute_calibration
+            from verdict.dashboard.evaluator_lab import execute_calibration, preview_calibration
+            from verdict.dashboard.spend_limit import within_static_spend_limit
 
             path = payload.get("labelSetPath")
             if not isinstance(path, str) or not path or len(path.encode("utf-8")) > 4096:
                 raise ValueError("invalid label set path")
+            preview = preview_calibration(path=path, config=payload)
+            if not within_static_spend_limit(
+                preview["upperStaticListPriceUsd"], payload.get("maxEstimatedUsd")
+            ):
+                raise ValueError("calibration exceeds estimated-spend limit")
             writable = setup.writable_storage()
             return execute_calibration(
                 writable,

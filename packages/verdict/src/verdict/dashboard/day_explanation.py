@@ -13,10 +13,11 @@ from fastapi.responses import JSONResponse
 
 from verdict.dashboard.app import build_agent_usage_bundle
 from verdict.dashboard.control_plane import ControlStore
-from verdict.dashboard.evaluator_lab import _destination
+from verdict.dashboard.evaluator_lab import _destination, _uses_public_list_price
 from verdict.dashboard.scoped_evaluation import _LOCK, _cross_process_scoped_guard
 from verdict.dashboard.setup_routes import SetupRoutes
-from verdict.pricing import compute_cost_usd
+from verdict.dashboard.spend_limit import within_static_spend_limit
+from verdict.pricing import compute_exact_list_price_usd
 from verdict.redaction import redact_structure
 
 _MODELS = {"anthropic": "claude-haiku-4-5", "openai": "gpt-4.1-mini"}
@@ -119,8 +120,9 @@ def preview_day_explanation(storage_url: str, *, tenant: str, config: dict[str, 
     # A byte can contribute at most one text token for the supported providers.
     # Include message framing slack and the output ceiling; this is a static list-price bound.
     input_bound = sum(len(message["content"].encode()) for message in messages) + 1_024
-    estimate = compute_cost_usd(model, input_bound, 512) if planned else None
-    return {
+    estimate = (compute_exact_list_price_usd(model, input_bound, 512)
+                if planned and _uses_public_list_price(provider) else None)
+    preview = {
         "day": day, "provider": provider, "model": model,
         "destination": destination, "planFingerprint": fingerprint,
         "promptVersion": _PROMPT_VERSION, "messages": messages,
@@ -129,6 +131,11 @@ def preview_day_explanation(storage_url: str, *, tenant: str, config: dict[str, 
         "maximumOutputTokens": 512, "upperStaticListPriceUsd": estimate,
         "externalEgressRequired": True,
     }
+    if planned:
+        history = ControlStore(storage_url).history(tenant, "usage_explanation", fingerprint)
+        if history:
+            preview["savedResult"] = {"resultId": fingerprint, **history[0]["payload"]}
+    return preview
 
 
 def run_day_explanation(
@@ -146,6 +153,10 @@ def run_day_explanation(
         history = store.history(tenant, "usage_explanation", document_id)
         if history:
             return {"resultId": document_id, **history[0]["payload"]}
+        cap = config.get("maxEstimatedUsd")
+        bound = preview["upperStaticListPriceUsd"]
+        if not within_static_spend_limit(bound, cap):
+            raise ValueError("day explanation exceeds estimated-spend limit")
         if provider_adapter is None and not os.environ.get(_KEYS[preview["provider"]]):
             raise ValueError("provider key is not configured")
         if provider_adapter is None and not preview["providerAvailable"]:

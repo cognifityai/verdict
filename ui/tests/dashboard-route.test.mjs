@@ -18,6 +18,32 @@ test("finding routes preserve every bounded affected run and the selected run", 
   });
 });
 
+test("a turn focus belongs only to a selected run", () => {
+  const focused = serializeDashboardRoute({ tab: "explore", section: "runs",
+    runIds: ["run-a"], selectedRunId: "run-a", focusedTurnId: "turn-24" });
+  assert.equal(parseDashboardRoute(focused).focusedTurnId, "turn-24");
+  assert.doesNotMatch(serializeDashboardRoute({ tab: "explore", section: "runs",
+    runIds: [], selectedRunId: null, focusedTurnId: "turn-24" }), /turn_id=/);
+  assert.equal(parseDashboardRoute("#tab=explore&section=runs&run=run-a&selected=run-a&turn_id=bad%00id").focusedTurnId, undefined);
+});
+
+test("local follow-up review intent belongs only to an exact selected turn", () => {
+  const review = serializeDashboardRoute({ tab: "explore", section: "runs",
+    runIds: ["run-a"], selectedRunId: "run-a", focusedTurnId: "turn-24",
+    followupReview: true });
+  assert.match(review, /review=followup/);
+  assert.equal(parseDashboardRoute(review).followupReview, true);
+  assert.equal(parseDashboardRoute(review).focusedTurnId, "turn-24");
+  for (const hash of [
+    "#tab=explore&section=runs&run=run-a&selected=run-a&turn_id=turn-24",
+    "#tab=explore&section=runs&run=run-a&selected=run-a&review=followup",
+    "#tab=explore&section=runs&run=run-a&selected=run-a&turn_id=bad%00id&review=followup",
+    "#tab=explore&section=runs&run=run-a&selected=run-a&turn_id=turn-24&review=unknown",
+  ]) assert.notEqual(parseDashboardRoute(hash).followupReview, true);
+  assert.doesNotMatch(serializeDashboardRoute({ tab: "overview", section: "summary",
+    followupReview: true, focusedTurnId: "turn-24" }), /review=/);
+});
+
 test("recorded source and agent group routes filter runs without carrying an old selection", () => {
   for (const [field, parameter, value] of [
     ["sourceKind", "source", "custom/agent"],
@@ -205,6 +231,13 @@ test("exact notice context survives a selected run hash and clears outside runs"
   assert.equal(serializeDashboardRoute({ ...route, tab: "monitor", section: "status" }).includes("notice="), false);
   assert.equal(serializeDashboardRoute({ ...route, runIds: [], selectedRunId: null }).includes("notice="), false);
   assert.equal(serializeDashboardRoute({ ...route, noticeId: "bad\0notice" }).includes("notice="), false);
+});
+
+test("an outcome notice handoff survives the monitoring plan route", () => {
+  const noticeId = "a".repeat(64);
+  const hash = serializeDashboardRoute({ tab: "monitor", section: "plan", noticeId });
+  assert.equal(parseDashboardRoute(hash).noticeId, noticeId);
+  assert.doesNotMatch(serializeDashboardRoute({ tab: "monitor", section: "status", noticeId }), /notice=/);
 });
 
 test("exact recent event links retain revision and original IDs only for a selected run", () => {

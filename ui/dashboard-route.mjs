@@ -140,6 +140,8 @@ export function parseDashboardRoute(hash, fallbackTab = "overview") {
     ? selectionId(params.get("source")) : null;
   const agentName = tab === "explore" && section === "runs" && runIds.length === 0
     ? selectionId(params.get("agent")) : null;
+  const focusedTurnId = tab === "explore" && section === "runs" && selectedRunId
+    ? selectionId(params.get("turn_id")) : null;
   return {
     tab,
     section,
@@ -154,8 +156,12 @@ export function parseDashboardRoute(hash, fallbackTab = "overview") {
     evaluatorId: retiredDriftRoute ? null : bounded(params.get("evaluator"), 64),
     eventId: tab === "explore" && section === "runs" && selectedRunId
       ? selectionId(params.get("event_id")) : null,
+    ...(focusedTurnId ? { focusedTurnId } : {}),
+    ...(focusedTurnId && params.get("review") === "followup"
+      ? { followupReview: true } : {}),
     ...(recentReference ? { recentRevision, recentTurnId, recentEventId } : {}),
-    ...(tab === "explore" && section === "runs" && selectedRunId
+    ...(((tab === "explore" && section === "runs" && selectedRunId)
+      || (tab === "monitor" && section === "plan"))
       && selectionId(params.get("notice"))
       ? { noticeId: selectionId(params.get("notice")) } : {}),
     ...(sourceKind ? { sourceKind } : {}),
@@ -191,6 +197,11 @@ export function serializeDashboardRoute(route) {
   if (tab === "explore" && section === "runs" && runIds.includes(route?.selectedRunId)) {
     const eventId = selectionId(route?.eventId);
     if (eventId) params.set("event_id", eventId);
+    const focusedTurnId = selectionId(route?.focusedTurnId);
+    if (focusedTurnId) {
+      params.set("turn_id", focusedTurnId);
+      if (route?.followupReview === true) params.set("review", "followup");
+    }
     const noticeId = selectionId(route?.noticeId);
     if (noticeId) params.set("notice", noticeId);
     const recentRevision = route?.recentRevision;
@@ -201,6 +212,10 @@ export function serializeDashboardRoute(route) {
       params.set("recent_turn", recentTurnId);
       params.set("recent_event", recentEventId);
     }
+  }
+  if (tab === "monitor" && section === "plan") {
+    const noticeId = selectionId(route?.noticeId);
+    if (noticeId) params.set("notice", noticeId);
   }
   if (tab === "explore" && section === "runs" && runIds.length === 0) {
     const sourceKind = selectionId(route?.sourceKind);

@@ -317,6 +317,9 @@ class Judgment:
     expected_dimensions: list[str] = field(default_factory=list)
     status: JudgmentStatus = JudgmentStatus.COMPLETED
     error: str | None = None
+    # Evidence supplied to the judge before the call; absent means a local
+    # reprojected Trace cannot claim this Judgment as current.
+    evaluated_trace_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, JudgmentStatus):

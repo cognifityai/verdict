@@ -322,6 +322,7 @@ class InMemoryStorage:
         historical_facts=(),
         full_projection=None,
         recent_traces=(),
+        automatic_turn_ids: tuple[str, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
         prepared_recent, recent_ids = _prepare_linked_traces(
@@ -341,6 +342,7 @@ class InMemoryStorage:
             recent_window_json=recent_window_json,
             recent_facts=recent_facts, historical_facts=historical_facts,
             full_projection=full_projection,
+            automatic_turn_ids=automatic_turn_ids,
         )
 
     def append_agent_capture(
@@ -364,6 +366,7 @@ class InMemoryStorage:
         recent_facts: tuple[LocalRecentFact, ...] = (),
         historical_facts: tuple[LocalRecentFact, ...] = (),
         full_projection: LocalFullProjection | None = None,
+        automatic_turn_ids: tuple[str, ...] = (),
     ) -> None:
         window = (validate_recent_window_json(
             recent_window_json, run_id=capture.run.run_id, revision=local_revision,
@@ -381,6 +384,22 @@ class InMemoryStorage:
                                  historical_facts, local_revision)
         all_recent_facts = (*recent_facts, *historical_facts,
                             *(full_projection.facts if full_projection else ()))
+        automatic_ids = frozenset(automatic_turn_ids)
+        if automatic_ids and (
+            local_revision is None or capture.session.source_kind != "claude-code"
+            or any(
+                turn.user_request_redacted is not None
+                for turn in (*capture.turns,
+                             *(full_projection.tail_turns if full_projection else ()))
+                if turn.turn_id in automatic_ids
+            )
+        ):
+            raise ValueError("invalid automatic Turn reclassification")
+        automatic_trace_ids = {
+            event.trace_id
+            for event in (*capture.events, *(fact.event for fact in all_recent_facts))
+            if event.turn_id in automatic_ids and event.trace_id is not None
+        }
         with self._agent_evidence_lock:
             capture = normalize_bundle_timestamps(capture)
             tenant_id = capture.run.tenant_id
@@ -406,6 +425,7 @@ class InMemoryStorage:
                             text_compatibility.turn_previews
                             if text_compatibility is not None else None
                         ),
+                        automatic_turn_ids=automatic_ids,
                     )
                 current_limits = {event.event_id for event in capture.events
                                   if event.provenance == "verdict:capture_limit"}
@@ -416,10 +436,38 @@ class InMemoryStorage:
                          or (value.provenance == "verdict:capture_limit"
                              and value.event_id not in current_limits))
                 }
+            projected_trace_ids = {trace.trace_id for trace in capture_traces}
+            stored_automatic_traces = {
+                event.trace_id
+                for (scope, run, _), event in self._agent_events.items()
+                if scope == tenant_id and run == capture.run.run_id
+                and event.turn_id in automatic_ids and event.trace_id is not None
+            } | {
+                fact.event.trace_id
+                for (scope, run, _), (fact, _) in self._local_recent_facts.items()
+                if scope == tenant_id and run == capture.run.run_id
+                and fact.event.turn_id in automatic_ids
+                and fact.event.trace_id is not None
+            }
+            if stored_automatic_traces - projected_trace_ids:
+                raise ValueError("local_source_reprojection_required")
+            with self._cluster_v2_lock:
+                for trace_id in automatic_trace_ids:
+                    current = self._traces.get(trace_id)
+                    if current is None or current.prompt_redacted is None:
+                        continue
+                    assigned = any(
+                        scope == tenant_id and candidate_trace_id == trace_id
+                        for scope, _version, candidate_trace_id
+                        in self._trace_cluster_assignments
+                    )
+                    if current.cluster_id is not None or assigned:
+                        raise ValueError("local_source_registry_conflict")
             prepared_traces = [
                 merge_capture_trace(
                     self._traces.get(trace.trace_id),
                     trace,
+                    clear_local_request=trace.trace_id in automatic_trace_ids,
                     legacy_preview=(
                         text_compatibility.trace_previews.get(trace.trace_id)
                         if text_compatibility is not None else None
@@ -434,10 +482,13 @@ class InMemoryStorage:
                 merge_agent_turn(
                     self._agent_turns.get((tenant_id, run.run_id, turn.turn_id)),
                     turn,
+                    replace_progress=(local_revision is not None
+                                      and capture.session.source_kind == "codex"),
                     legacy_preview=(
                         text_compatibility.turn_previews.get(turn.turn_id)
                         if text_compatibility is not None else None
                     ),
+                    clear_local_request=turn.turn_id in automatic_ids,
                 )
                 for turn in capture.turns
             ]
@@ -544,7 +595,9 @@ class InMemoryStorage:
             with self._cluster_v2_lock:
                 for trace in prepared_traces:
                     self._traces[trace.trace_id] = trace
-                    if any(fact.event.trace_id == trace.trace_id for fact in all_recent_facts):
+                    if (trace.trace_id in automatic_trace_ids
+                            or any(fact.event.trace_id == trace.trace_id
+                                   for fact in all_recent_facts)):
                         self._local_recent_trace_evidence[trace.trace_id] = (
                             trace_evidence_fingerprint(trace)
                         )
@@ -1533,7 +1586,7 @@ class InMemoryStorage:
         sanitize_judgment(judgment)
         self._judgments[judgment.judgment_id] = judgment
         self._judgment_recent_evidence[judgment.judgment_id] = (
-            self._local_recent_trace_evidence.get(judgment.trace_id)
+            judgment.evaluated_trace_fingerprint
         )
 
     def _current_judgment(self, judgment: Judgment) -> bool:
@@ -1792,7 +1845,7 @@ class InMemoryStorage:
     ) -> None:
         tenant = version.tenant_id
         version_key = (tenant, version.version_id)
-        with self._cluster_v2_lock:
+        with self._agent_evidence_lock, self._cluster_v2_lock:
             if version_key in self._cluster_versions:
                 raise ValueError("cluster registry version already exists")
             candidate_identities = copy.deepcopy(self._cluster_identities)
@@ -1830,6 +1883,11 @@ class InMemoryStorage:
                     copy.deepcopy(cluster)
                 )
             for assignment in assignments:
+                trace = self._traces.get(assignment.trace_id)
+                if (trace is not None and trace.tenant_id == tenant
+                        and assignment.trace_id in self._local_recent_trace_evidence
+                        and trace.prompt_redacted is None):
+                    raise ValueError("local_source_registry_conflict")
                 self._validate_preview_assignment(
                     tenant, version.version_id, assignment, candidate_clusters
                 )
@@ -1887,9 +1945,14 @@ class InMemoryStorage:
         authorized_tenant: str,
         assignments: list[TraceClusterAssignment],
     ) -> None:
-        with self._cluster_v2_lock:
+        with self._agent_evidence_lock, self._cluster_v2_lock:
             candidate = copy.deepcopy(self._trace_cluster_assignments)
             for assignment in assignments:
+                trace = self._traces.get(assignment.trace_id)
+                if (trace is not None and trace.tenant_id == authorized_tenant
+                        and assignment.trace_id in self._local_recent_trace_evidence
+                        and trace.prompt_redacted is None):
+                    raise ValueError("local_source_registry_conflict")
                 if assignment.tenant_id != authorized_tenant:
                     raise ValueError("cluster assignment tenant mismatch")
                 if (authorized_tenant, assignment.version_id) not in self._cluster_versions:
@@ -2014,7 +2077,7 @@ class InMemoryStorage:
     ) -> ActiveClusterRegistry:
         if action not in {"activated", "rolled_back"}:
             raise ValueError("activation action is invalid")
-        with self._cluster_v2_lock:
+        with self._agent_evidence_lock, self._cluster_v2_lock:
             pointer = self._active_cluster_registries.setdefault(
                 authorized_tenant, ActiveClusterRegistry(authorized_tenant)
             )

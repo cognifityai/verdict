@@ -38,6 +38,7 @@ from verdict.dashboard.app import (
 )
 from verdict.dashboard.control_plane import ControlStore
 from verdict.dashboard.evaluator_lab import _IdentityOnlyProvider
+from verdict.dashboard.evidence_explanation import preview_explanation, run_explanation
 from verdict.dashboard.query import PostgresSession
 from verdict.dashboard.run_outcome_preview import build_run_outcome_preview
 from verdict.dashboard.scoped_evaluation import (
@@ -96,6 +97,294 @@ POSTGRES_SKIP_REASON = "no explicitly disposable live PostgreSQL database"
 pytestmark = pytest.mark.skipif(DSN is None, reason=POSTGRES_SKIP_REASON)
 
 
+def test_live_postgres_trace_list_defers_long_content_like_sqlite(tmp_path) -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_trace_preview_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        sqlite_path = tmp_path / "trace-preview.db"
+        sqlite = SQLiteStorage(str(sqlite_path))
+        postgres = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+        try:
+            for storage in (sqlite, postgres):
+                storage.insert_trace(Trace(
+                    trace_id="long", tenant_id="local", provider="synthetic",
+                    request_model="example", prompt_redacted="P" * 40_000,
+                    response_redacted="R" * 40_000,
+                    error="E" * 40_000, started_at=now, ended_at=now,
+                ))
+                storage.insert_trace(Trace(
+                    trace_id="unicode", tenant_id="local", provider="synthetic",
+                    request_model="example", prompt_redacted="😀" * 8_000,
+                    response_redacted="😀" * 600,
+                    started_at=now + timedelta(seconds=1), ended_at=now + timedelta(seconds=1),
+                ))
+                storage.insert_trace(Trace(
+                    trace_id="empty-error", tenant_id="local", provider="synthetic",
+                    request_model="example", error="",
+                    started_at=now + timedelta(seconds=2), ended_at=now + timedelta(seconds=2),
+                ))
+                storage.insert_trace(Trace(
+                    trace_id="foreign", tenant_id="other", provider="synthetic",
+                    request_model="example", prompt_redacted="foreign evidence",
+                    started_at=now + timedelta(seconds=3), ended_at=now + timedelta(seconds=3),
+                ))
+        finally:
+            sqlite.close()
+            postgres.close()
+
+        for selected_id, offset in ((None, 0), ("unicode", 1), ("long", 0)):
+            sqlite_bundle = build_bundle(
+                sqlite_path, registry_tenant="local", trace_id=selected_id,
+                trace_offset=offset,
+            )
+            postgres_bundle = build_bundle(
+                scoped_dsn, registry_tenant="local", trace_id=selected_id,
+                trace_offset=offset,
+            )
+            assert postgres_bundle["samples"] == sqlite_bundle["samples"]
+            assert postgres_bundle["selectedTrace"] == sqlite_bundle["selectedTrace"]
+            assert "foreign" not in {row["trace_id"] for row in postgres_bundle["samples"]}
+            assert postgres_bundle["meta"]["totalTraces"] == 3
+        listed = build_bundle(scoped_dsn, registry_tenant="local")
+        by_id = {row["trace_id"]: row for row in listed["samples"]}
+        assert by_id["long"]["deterministicFacts"] is None
+        assert by_id["long"]["traceState"] == "error_recorded"
+        assert by_id["empty-error"]["traceState"] == "error_recorded"
+        assert listed["providers"][0]["errors"] == 2
+        assert listed["managementReport"]["scope"]["errorRecordedCalls"] == 2
+        assert by_id["unicode"]["promptPreviewDeferred"] is False
+        assert by_id["unicode"]["responsePreviewDeferred"] is False
+        assert by_id["unicode"]["deterministicFacts"]["responseCharacters"] == 600
+        assert next(row for row in build_bundle(
+            scoped_dsn, registry_tenant="local", trace_id="long",
+        )["samples"] if row["trace_id"] == "long")[
+            "deterministicFacts"
+        ]["responseCharacters"] == 40_000
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_live_postgres_run_detail_focuses_exact_turn_page() -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_turn_focus_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+        turns = tuple(AgentTurn(
+            f"turn-{index}", "run", index, now, ExecutionStatus.COMPLETED, now,
+            "request", "response", EvidenceState.PRESENT, EvidenceState.PRESENT,
+        ) for index in range(25))
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        try:
+            storage.replace_agent_run_bundle(AgentRunBundle(
+                SourceSession("source", "local", "synthetic-agent", "a" * 64, now, now),
+                AgentRun("run", "source", "local", now, ExecutionStatus.UNKNOWN),
+                turns, (),
+            ))
+        finally:
+            storage.close()
+        focused = build_agent_run_detail(scoped_dsn, tenant="local", run_id="run",
+                                        turn_limit=20, turn_id="turn-24")
+        assert focused["turnPage"]["offset"] == 20
+        assert [turn["turnId"] for turn in focused["turns"]] == [
+            f"turn-{index}" for index in range(20, 25)
+        ]
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_live_postgres_recent_followups_preserve_tenant_and_turn_identity() -> None:
+    import asyncio
+
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_followups_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        try:
+            for tenant in ("local", "other"):
+                turns = tuple(AgentTurn(
+                    f"{tenant}-{index}", f"run-{tenant}", index,
+                    now + timedelta(minutes=index), ExecutionStatus.COMPLETED,
+                    now + timedelta(minutes=index),
+                    "Follow-up request" if index else "Original request",
+                    None if index else "Prior answer",
+                    EvidenceState.PRESENT,
+                    EvidenceState.MISSING if index else EvidenceState.PRESENT,
+                ) for index in range(2))
+                storage.replace_agent_run_bundle(AgentRunBundle(
+                    SourceSession(f"source-{tenant}", tenant, "synthetic-agent",
+                                  "a" * 64, now, now),
+                    AgentRun(f"run-{tenant}", f"source-{tenant}", tenant,
+                             now, ExecutionStatus.UNKNOWN),
+                    turns, (),
+                ))
+        finally:
+            storage.close()
+        result = build_agent_runs_bundle(scoped_dsn, tenant="local", view="followups")
+        assert result["page"]["shown"] == 1
+        assert result["followups"][0]["turnId"] == "local-1"
+        assert result["followups"][0]["priorResponseExcerpt"] == "Prior answer"
+        assert result["followups"][0]["reviewStatus"] == "not_reviewed"
+
+        async def label_pair():
+            app = create_app(storage=scoped_dsn, tenant_id="local")
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                endpoint = "/api/runs/run-local/followup-review/local-1"
+                preview = await client.get(endpoint)
+                assert preview.status_code == 200
+                pair = preview.json()
+                assert pair["priorTurnId"] == "local-0"
+                token = (await client.get("/api/setup/token")).json()["setupToken"]
+                saved = await client.post(endpoint, headers={"X-Verdict-Setup": token}, json={
+                    "label": "unclear", "evidenceFingerprint": pair["evidenceFingerprint"],
+                    "expectedRevision": None,
+                })
+                assert saved.status_code == 200
+                assert saved.json()["label"] == "unclear"
+                page = await client.get("/api/runs?view=followups&limit=20")
+                assert page.status_code == 200
+                assert page.json()["followups"][0]["reviewStatus"] == "unclear"
+                assert (await client.get("/api/runs/run-other/followup-review/other-1")).status_code == 404
+            reopened = create_app(storage=scoped_dsn, tenant_id="local")
+            transport = httpx.ASGITransport(app=reopened)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                current = await client.get(endpoint)
+                assert current.status_code == 200
+                assert current.json()["label"] == "unclear"
+
+        asyncio.run(label_pair())
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection:
+            connection.execute(
+                "UPDATE agent_turns SET user_request_redacted=%s "
+                "WHERE tenant_id=%s AND run_id=%s AND turn_id=%s",
+                ("Changed request", "local", "run-local", "local-1"),
+            )
+        stale = create_app(storage=scoped_dsn, tenant_id="local")
+
+        async def check_stale():
+            transport = httpx.ASGITransport(app=stale)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                response = await client.get("/api/runs/run-local/followup-review/local-1")
+                assert response.status_code == 200
+                assert response.json()["stale"] is True
+                assert response.json()["label"] is None
+                page = await client.get("/api/runs?view=followups&limit=20")
+                assert page.status_code == 200
+                assert page.json()["followups"][0]["reviewStatus"] == "stale"
+
+        asyncio.run(check_stale())
+        canary = "sk-ant-" + "S" * 24
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection:
+            connection.execute(
+                "UPDATE agent_turns SET user_request_redacted=%s "
+                "WHERE tenant_id=%s AND run_id=%s AND turn_id=%s",
+                ("a" * 148 + " " + canary + " more text", "local", "run-local", "local-1"),
+            )
+        async def check_legacy_excerpt():
+            transport = httpx.ASGITransport(app=create_app(storage=scoped_dsn, tenant_id="local"))
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                return await client.get("/api/runs?view=followups&limit=20")
+
+        legacy = asyncio.run(check_legacy_excerpt())
+        assert legacy.status_code == 200
+        assert "sk-ant-" not in legacy.text
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+
+
+
+
+def test_live_postgres_saved_setup_draft_reopens_for_exact_tenant_and_evidence() -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_setup_draft_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        try:
+            storage.replace_agent_run_bundle(AgentRunBundle(
+                SourceSession("source", "tenant-a", "synthetic", "a" * 64, now, now),
+                AgentRun("run", "source", "tenant-a", now,
+                         ExecutionStatus.COMPLETED, now),
+                (AgentTurn("turn", "run", 0, now, ExecutionStatus.COMPLETED,
+                           now, "Synthetic request", "Synthetic answer",
+                           EvidenceState.PRESENT, EvidenceState.PRESENT),), (),
+            ))
+            config = {"scope": "setup", "provider": "anthropic", "focus": "setup"}
+            preview = preview_explanation(storage, storage_url=scoped_dsn,
+                                          tenant="tenant-a", config=config)
+            assert preview["plannedCalls"] == 1
+
+            class SyntheticProvider:
+                name = "anthropic"
+                calls = 0
+
+                def complete(self, _request):
+                    self.calls += 1
+                    return CompletionResponse(
+                        text='{"check":"agent_runs","grouping":"none",'
+                             '"intervalHours":24,"why":"Review captured runs."}',
+                        input_tokens=10, output_tokens=10)
+
+            provider = SyntheticProvider()
+            result = run_explanation(
+                storage, storage_url=scoped_dsn, tenant="tenant-a",
+                config={**config, "planFingerprint": preview["planFingerprint"],
+                        "maxEstimatedUsd": 1},
+                confirm_external_egress=True, provider_adapter=provider,
+            )
+            assert result["status"] == "completed"
+            reopened = preview_explanation(storage, storage_url=scoped_dsn,
+                                           tenant="tenant-a", config=config)
+            assert reopened["savedResult"]["resultId"] == result["resultId"]
+            assert reopened["savedResult"]["draft"]["check"] == "agent_runs"
+            assert preview_explanation(storage, storage_url=scoped_dsn,
+                                       tenant="tenant-b", config=config).get("savedResult") is None
+            replay = run_explanation(
+                storage, storage_url=scoped_dsn, tenant="tenant-a",
+                config={**config, "planFingerprint": preview["planFingerprint"],
+                        "maxEstimatedUsd": 1},
+                confirm_external_egress=True, provider_adapter=provider,
+            )
+            assert replay == result
+            assert provider.calls == 1
+        finally:
+            storage.close()
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
 def test_live_postgres_run_outcome_preview_matches_sqlite(tmp_path) -> None:
     import sqlite3
 
@@ -117,6 +406,8 @@ def test_live_postgres_run_outcome_preview_matches_sqlite(tmp_path) -> None:
                     ("customer-a", "success", "completed", False),
                     ("customer-a", "run-alice@example.com", "failed", True),
                     ("customer-a", "timeout", "timed_out", False),
+                    ("customer-a", "limited", "completed", None),
+                    ("customer-a", "unclassified", "completed", None),
                     ("customer-a", "unknown", "unknown", None),
                     ("customer-a", "unfinished", "completed", False),
                     ("customer-b", "FOREIGN-PRIVATE-RUN", "failed", True),
@@ -129,12 +420,30 @@ def test_live_postgres_run_outcome_preview_matches_sqlite(tmp_path) -> None:
                         started, AgentEventType.TOOL_RESULT, ExecutionStatus(status),
                         "test-tool", {"is_error": error},
                     ),)
-                    if run_id == "success":
+                    if run_id in {"success", "limited"}:
                         event += (AgentEvent(
-                            f"marker-{tenant}-{run_id}", f"turn-{tenant}-{run_id}", 1,
+                            f"marker-{tenant}-{run_id}", f"turn-{tenant}-{run_id}",
+                            len(event),
                             started, AgentEventType.CONTEXT, ExecutionStatus.UNKNOWN,
                             "verdict:capture_limit",
                             {"name": "source_events_omitted", "source": "1", "available": False},
+                        ),)
+                    if run_id in {"success", "timeout", "FOREIGN-PRIVATE-RUN"}:
+                        event += (AgentEvent(
+                            f"outcome-{tenant}-{run_id}", f"turn-{tenant}-{run_id}",
+                            len(event), started, AgentEventType.OUTCOME,
+                            ExecutionStatus.COMPLETED, "test-application",
+                            {"name": "resolved", "value": run_id == "success",
+                             "source": "application"},
+                            privacy_classification=PrivacyClassification.REDACTED,
+                        ),)
+                    if run_id == "unclassified":
+                        event += (AgentEvent(
+                            f"outcome-{tenant}-{run_id}", f"turn-{tenant}-{run_id}",
+                            len(event), started, AgentEventType.OUTCOME,
+                            ExecutionStatus.COMPLETED, "test-application",
+                            {"name": "", "value": True, "source": "application"},
+                            privacy_classification=PrivacyClassification.REDACTED,
                         ),)
                     store.replace_agent_run_bundle(AgentRunBundle(
                         SourceSession(source_id, tenant, "verdict_sdk",
@@ -179,16 +488,22 @@ def test_live_postgres_run_outcome_preview_matches_sqlite(tmp_path) -> None:
             f"sqlite:///{sqlite_path}", tenant="customer-a")
         postgres_result = build_run_outcome_preview(scoped_dsn, tenant="customer-a")
         assert postgres_result == sqlite_result
-        assert postgres_result["scope"]["terminalRuns"] == 3
+        assert postgres_result["scope"]["terminalRuns"] == 5
+        reported = postgres_result["reportedOutcomes"]
+        assert reported["status"] == "ready"
+        assert reported["groups"][0]["recordedTrue"] == 1
+        assert reported["groups"][0]["recordedFalse"] == 1
+        assert reported["groups"][0]["missing"] == 1
+        assert reported["groups"][0]["unclear"] == 2
         assert postgres_result["execution"]["totals"] == {
-            "completed": 1, "failed": 1, "timed_out": 1,
+            "completed": 3, "failed": 1, "timed_out": 1,
             "cancelled": 0, "unfinalized": 2,
         }
         assert postgres_result["totals"]["observedWithoutFailure"] == 0
-        assert postgres_result["totals"]["unclear"] == 1
+        assert postgres_result["totals"]["unclear"] == 3
         assert postgres_result["groups"][0]["comparison"] == sqlite_result["groups"][0]["comparison"]
-        assert postgres_result["groups"][0]["comparison"]["earlier"]["terminalRuns"] == 1
-        assert postgres_result["groups"][0]["comparison"]["newer"]["terminalRuns"] == 2
+        assert postgres_result["groups"][0]["comparison"]["earlier"]["terminalRuns"] == 2
+        assert postgres_result["groups"][0]["comparison"]["newer"]["terminalRuns"] == 3
         assert "FOREIGN-PRIVATE-RUN" not in json.dumps(postgres_result)
         selected_day = "2026-10-19"
         selected_now = datetime(2026, 10, 19, tzinfo=timezone.utc)
@@ -217,6 +532,65 @@ def test_live_postgres_run_outcome_preview_matches_sqlite(tmp_path) -> None:
         unmigrated = build_run_outcome_preview(scoped_dsn, tenant="customer-a")
         assert unmigrated["status"] == "migration_required"
         assert unmigrated["totals"] is None
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_live_postgres_redacted_outcome_identity_matches_sqlite(tmp_path) -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_redacted_outcomes_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        path = tmp_path / "redacted-outcomes.db"
+        stores = (SQLiteStorage(str(path)),
+                  PostgresStorage(scoped_dsn, min_pool=1, max_pool=1))
+        try:
+            for store in stores:
+                for run_id, service, flag in (
+                    ("a", "alpha@example.invalid", True),
+                    ("b", "bravo@example.invalid", False),
+                    ("c", "checkout", True),
+                ):
+                    started = datetime(2026, 10, 19, tzinfo=timezone.utc)
+                    source_id = f"source-{run_id}"
+                    store.replace_agent_run_bundle(AgentRunBundle(
+                        SourceSession(source_id, "customer-a", "verdict_sdk",
+                                      sha256(source_id.encode()).hexdigest(),
+                                      started, started),
+                        AgentRun(run_id, source_id, "customer-a", started,
+                                 ExecutionStatus.COMPLETED, started,
+                                 agent_name="worker", service_name=service,
+                                 environment="prod"),
+                        (AgentTurn(f"turn-{run_id}", run_id, 0, started,
+                                   ExecutionStatus.COMPLETED, started),),
+                        (AgentEvent(f"outcome-{run_id}", f"turn-{run_id}", 0,
+                                    started, AgentEventType.OUTCOME,
+                                    ExecutionStatus.COMPLETED, "test-application",
+                                    {"name": "resolved", "source": "application",
+                                     "value": flag},
+                                    privacy_classification=PrivacyClassification.REDACTED),),
+                    ))
+        finally:
+            for store in stores:
+                store.close()
+        sqlite_result = build_run_outcome_preview(f"sqlite:///{path}", tenant="customer-a")
+        postgres_result = build_run_outcome_preview(scoped_dsn, tenant="customer-a")
+        assert postgres_result["reportedOutcomes"] == sqlite_result["reportedOutcomes"]
+        reported = postgres_result["reportedOutcomes"]
+        assert reported["identityUnavailableReports"] == 2
+        assert len(reported["groups"]) == 1
+        assert reported["groups"][0]["serviceName"] == "checkout"
+        assert postgres_result["execution"]["identityUnavailableRuns"] == 2
+        assert postgres_result["identityUnavailableRuns"] == 2
+        assert all(group["serviceName"] == "checkout"
+                   for group in postgres_result["execution"]["groups"]
+                   + postgres_result["groups"])
     finally:
         with psycopg.connect(DSN, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
@@ -321,7 +695,8 @@ def test_live_postgres_run_preview_uses_one_snapshot_during_writer(monkeypatch) 
 
         def pause_after_run_select(self, query, params=()):
             result = original_execute(self, query, params)
-            if query.startswith("SELECT r.run_id,r.agent_name"):
+            if ("FROM agent_runs r JOIN import_sources s" in query
+                    and "AND r.ended_at IS NOT NULL" in query):
                 run_selected.set()
                 assert writer_done.wait(10), "writer did not commit after run selection"
             return result
@@ -455,7 +830,7 @@ def test_postgres_read_only_dashboard_reports_legacy_analysis_without_revision_c
         run = DeterministicAnalysisRun(
             analysis_id="a" * 64, tenant_id="local", scope_key="agent-and-trace",
             cutoff=now, completed_at=now, status=AnalysisRunStatus.COMPLETED,
-            analyzer_version="agent-insights-v5", input_fingerprint="b" * 64,
+            analyzer_version="agent-insights-v6", input_fingerprint="b" * 64,
             result={"schema": "agent-insights-v2", "scope": {"availableRuns": 0,
                 "analyzedRuns": 0, "complete": True, "traces": {"available": 0,
                     "analyzed": 0, "complete": True}}},
@@ -671,7 +1046,7 @@ def test_postgres_concurrent_same_identity_recheck_repoints_current(monkeypatch)
             storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
             try:
                 assert storage.get_latest_deterministic_analysis_run(
-                    tenant, "agent-and-trace", analyzer_version="agent-insights-v5",
+                    tenant, "agent-and-trace", analyzer_version="agent-insights-v6",
                 ).analysis_id == newer["analysisState"]["analysisId"]
             finally:
                 storage.close()
@@ -684,7 +1059,7 @@ def test_postgres_concurrent_same_identity_recheck_repoints_current(monkeypatch)
     storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
     try:
         assert storage.get_latest_deterministic_analysis_run(
-            tenant, "agent-and-trace", analyzer_version="agent-insights-v5",
+            tenant, "agent-and-trace", analyzer_version="agent-insights-v6",
         ).analysis_id == returned["analysisState"]["analysisId"]
     finally:
         storage._exec("DELETE FROM deterministic_analysis_runs WHERE tenant_id=%s", (tenant,))
@@ -841,7 +1216,8 @@ def test_live_postgres_identical_scoped_evaluations_call_provider_once() -> None
                       {"name": "completion", "description": "Did the task complete?"},
                   ]}}
         preview = preview_scoped(storage, tenant="local", config=config)
-        approved = {**config, "planFingerprint": preview["planFingerprint"]}
+        approved = {**config, "planFingerprint": preview["planFingerprint"],
+                    "maxEstimatedUsd": preview["upperStaticListPriceUsd"]}
         storage.close()
         context = multiprocessing.get_context("spawn")
         start = context.Event()
@@ -1110,6 +1486,75 @@ def test_live_postgres_scoped_preview_and_saved_case_experiment(monkeypatch) -> 
         assert saved.status_code == 200, saved.text
         assert ran.status_code == 200, ran.text
         assert ran.json()["comparison"]["fixed"] == ["critical_outage"]
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
+@pytest.mark.parametrize("partial_source", [False, True])
+def test_live_postgres_adjacent_turn_review_uses_tenant_scoped_storage(partial_source) -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_turn_window_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        now = datetime.now(timezone.utc)
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.replace_agent_run_bundle(AgentRunBundle(
+            SourceSession("source", "local", "synthetic", "a" * 64, now, now),
+            AgentRun("run", "source", "local", now, ExecutionStatus.COMPLETED, now),
+            (
+                AgentTurn("turn-a", "run", 0, now, ExecutionStatus.COMPLETED, now,
+                          "Write the file", "I wrote it", EvidenceState.PRESENT, EvidenceState.PRESENT),
+                AgentTurn("turn-b", "run", 1, now, ExecutionStatus.COMPLETED, now,
+                          "It is missing; please correct it", "I will check", EvidenceState.PRESENT, EvidenceState.PRESENT),
+            ), (AgentEvent("limit", "turn-a", 0, now, AgentEventType.INSTRUCTION,
+                           ExecutionStatus.COMPLETED, "verdict:capture_limit", {},
+                           PrivacyClassification.REDACTED),) if partial_source else (),
+        ))
+        config = {"scope": "turn_window", "runId": "run", "turnId": "turn-b",
+                  "provider": "anthropic", "model": "claude-haiku-4-5",
+                  "rubric": {"name": "correction_review", "version": "1", "dimensions": [
+                      {"name": "correction", "description": "Did the user correct the agent?"},
+                  ]}}
+        if partial_source:
+            assert preview_scoped(storage, tenant="local", config=config)["plannedCalls"] == 0
+            config = {key: value for key, value in config.items() if key != "rubric"}
+            config["scope"] = "followup_text"
+        preview = preview_scoped(storage, tenant="local", config=config)
+        assert preview["plannedCalls"] == 1
+        if partial_source:
+            assert preview["evidencePreview"]["coverageBasis"] == "recorded_text_only"
+            assert preview["evidencePreview"]["sourceCoveragePartial"] is True
+        assert preview["evidencePreview"]["evidenceReferences"] == ["turn:turn-a", "turn:turn-b"]
+        assert "It is missing" in preview["evidencePreview"]["query"]
+        with pytest.raises(KeyError):
+            preview_scoped(storage, tenant="other", config=config)
+        class SyntheticProvider:
+            name = "anthropic"
+            supports_temperature = _IdentityOnlyProvider("anthropic").supports_temperature
+
+            def complete(self, request):
+                return CompletionResponse(text=(
+                    '{"correction":{"reasoning":"[turn:turn-a] [turn:turn-b] '
+                    'show the correction","verdict":"FAIL"}}'
+                ), input_tokens=10, output_tokens=10)
+
+        result = execute_scoped(
+            storage, storage_url=scoped_dsn, tenant="local",
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "maxEstimatedUsd": preview["upperStaticListPriceUsd"]},
+            confirm_external_egress=True, provider=SyntheticProvider(),
+        )
+        reopened = preview_scoped(storage, tenant="local", config=config,
+                                  storage_url=scoped_dsn)
+        assert reopened["savedResult"]["resultId"] == result["resultId"]
+        assert reopened["savedResult"]["dimensions"][0]["verdict"] == "fail"
+        storage.close()
     finally:
         with psycopg.connect(DSN, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))

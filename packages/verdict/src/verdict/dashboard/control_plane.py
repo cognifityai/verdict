@@ -11,7 +11,7 @@ from typing import Any
 from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.storage.sqlite import sqlite_path
 
-KINDS = {"settings", "schedule", "alert", "proposal", "review", "case_set", "experiment", "scoped_evaluation", "scheduled_evaluation", "usage_explanation", "evidence_explanation"}
+KINDS = {"settings", "schedule", "alert", "proposal", "improvement", "review", "case_set", "experiment", "scoped_evaluation", "scheduled_evaluation", "usage_explanation", "evidence_explanation"}
 STATES = {
     "settings": {"active"},
     "schedule": {"active", "disabled"},
@@ -76,6 +76,8 @@ def _safe_json(payload: object) -> str:
 def _validate(kind: str, document_id: str, state: str, payload: dict[str, Any]) -> str:
     if kind not in KINDS or _IDENTITY.fullmatch(document_id) is None:
         raise ValueError("invalid control identity")
+    if kind == "improvement":
+        raise ValueError("saved change records are read-only")
     if state not in STATES[kind]:
         raise ValueError("invalid control state")
     if kind == "schedule":
@@ -252,7 +254,7 @@ class ControlStore:
             connection.execute(self._schema(self.postgres))
             if self.postgres:
                 connection.execute("LOCK TABLE product_control_documents IN SHARE ROW EXCLUSIVE MODE")
-            elif kind == "scheduled_evaluation":
+            elif kind in {"scheduled_evaluation", "review"}:
                 connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT revision,state,payload_json FROM product_control_documents "
@@ -323,6 +325,8 @@ class ControlStore:
         self, tenant: str, *, kind: str, document_id: str,
         target_revision: int, expected_revision: int,
     ) -> dict[str, object]:
+        if kind == "improvement":
+            raise ValueError("saved change records are read-only")
         if kind == "scheduled_evaluation":
             raise ValueError("spent external-evaluation approvals cannot be rearmed")
         history = self.history(tenant, kind, document_id)

@@ -64,6 +64,50 @@ def test_cycle_status_preserves_start_unknown_failure_and_prior_success(tmp_path
     assert status.read("tenant")["scheduleRevision"] == 2
 
 
+def test_manual_check_does_not_hide_latest_worker_cycle(tmp_path):
+    status = WorkerCycleStatus(f"sqlite:///{tmp_path / 'latest-worker.db'}")
+    start = datetime(2026, 11, 3, 10, tzinfo=timezone.utc)
+    assert status.read_pair("tenant")[1]["state"] == "never_run"
+    status.begin("tenant", trigger="worker", schedule_revision=4, now=start)
+    status.finish("tenant", state="completed", analysis_status="completed",
+                  failure_code=None, now=start + timedelta(seconds=2))
+    status.begin("tenant", trigger="manual", schedule_revision=4,
+                 now=start + timedelta(minutes=1))
+    status.finish("tenant", state="failed", analysis_status="error",
+                  failure_code="analysis_error", now=start + timedelta(minutes=1, seconds=1))
+    overall, worker = status.read_pair("tenant")
+    assert overall["trigger"] == "manual" and overall["state"] == "failed"
+    assert worker["trigger"] == "worker" and worker["state"] == "completed"
+    assert worker["scheduleRevision"] == 4
+    assert status.read_pair("other")[1]["state"] == "never_run"
+
+
+def test_legacy_worker_failure_does_not_inherit_manual_success(tmp_path):
+    status = WorkerCycleStatus(f"sqlite:///{tmp_path / 'legacy-success.db'}")
+    start = datetime(2026, 11, 3, 10, tzinfo=timezone.utc)
+    status.begin("tenant", trigger="manual", schedule_revision=None, now=start)
+    status.finish("tenant", state="completed", analysis_status="completed",
+                  failure_code=None, now=start + timedelta(seconds=1))
+    status.begin("tenant", trigger="worker", schedule_revision=1,
+                 now=start + timedelta(minutes=1))
+    status.finish("tenant", state="failed", analysis_status="error",
+                  failure_code="analysis_error", now=start + timedelta(minutes=1, seconds=1))
+    with status._connection() as connection:
+        connection.execute("DROP TABLE verdict_latest_worker_cycle_status")
+    assert status.read_pair("tenant")[1]["lastSuccessAt"] is None
+    status.begin("tenant", trigger="manual", schedule_revision=1,
+                 now=start + timedelta(minutes=2))
+    assert status.read_pair("tenant")[1]["lastSuccessAt"] is None
+
+    completed = WorkerCycleStatus(f"sqlite:///{tmp_path / 'legacy-completed.db'}")
+    completed.begin("tenant", trigger="worker", schedule_revision=1, now=start)
+    completed.finish("tenant", state="completed", analysis_status="completed",
+                     failure_code=None, now=start + timedelta(seconds=2))
+    with completed._connection() as connection:
+        connection.execute("DROP TABLE verdict_latest_worker_cycle_status")
+    assert completed.read_pair("tenant")[1]["lastSuccessAt"] == (start + timedelta(seconds=2)).isoformat()
+
+
 def test_cycle_outcome_requires_selected_checks_and_delivery():
     base = {"analysis": {"status": "completed"},
             "scheduledEvaluation": {"status": "idle"}, "notifications": []}

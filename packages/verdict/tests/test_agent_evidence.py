@@ -109,6 +109,19 @@ def test_bundle_round_trip_preserves_optional_turn_usage_and_truncation() -> Non
     assert agent_run_bundle_from_json(agent_run_bundle_to_json(enriched)) == enriched
 
 
+def test_bundle_round_trip_preserves_optional_progress_and_old_payload() -> None:
+    original = _bundle()
+    with_progress = replace(
+        original,
+        turns=(replace(original.turns[0], progress_redacted="10:00 update: working"),),
+    )
+    assert agent_run_bundle_from_json(agent_run_bundle_to_json(with_progress)) == with_progress
+
+    payload = json.loads(agent_run_bundle_to_json(original))
+    payload["turns"][0].pop("progress_redacted")
+    assert agent_run_bundle_from_json(json.dumps(payload)) == original
+
+
 def test_bundle_reader_accepts_pre_usage_turn_payload() -> None:
     original = _bundle()
     serialized = agent_run_bundle_to_json(original)

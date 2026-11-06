@@ -32,6 +32,7 @@ from verdict.schema import (
 from verdict.storage.base import Storage
 
 CAPTURE_SCHEMA = "verdict-capture-v1"
+AGENT_CAPTURE_SCHEMA = "verdict-capture-v2"
 DEFAULT_SEGMENT_BYTES = 8 * 1024 * 1024
 DEFAULT_DIRECTORY_BYTES = 128 * 1024 * 1024
 MAX_RECORD_BYTES = 4 * 1024 * 1024
@@ -288,7 +289,7 @@ class CaptureRecord:
 
 def _record_bytes(kind: CaptureKind, record: object) -> bytes:
     envelope: dict[str, Any] = {
-        "schema": CAPTURE_SCHEMA,
+        "schema": AGENT_CAPTURE_SCHEMA if kind == "agent" else CAPTURE_SCHEMA,
         "kind": kind,
         "record": record,
     }
@@ -315,13 +316,17 @@ def decode_capture_record(raw: bytes) -> CaptureRecord | None:
         raise ValueError("capture record has an invalid shape")
     kind = payload["kind"]
     record = payload["record"]
-    if payload["schema"] != CAPTURE_SCHEMA:
+    if not isinstance(payload["schema"], str) or payload["schema"] not in {
+        CAPTURE_SCHEMA, AGENT_CAPTURE_SCHEMA
+    } or (
+        payload["schema"] == AGENT_CAPTURE_SCHEMA and kind != "agent"
+    ):
         raise ValueError("capture record has an unsupported schema")
     # Alpha releases wrote user-feedback records into the same spool. The
     # feature is retired, but those records must not block later trace replay.
     if kind == "signal":
         return None
-    if kind not in {"trace", "agent", "span"}:
+    if not isinstance(kind, str) or kind not in {"trace", "agent", "span"}:
         raise ValueError("capture record has an unsupported schema")
     if kind == "trace":
         return CaptureRecord(kind="trace", trace=_trace_from_payload(record))

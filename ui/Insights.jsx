@@ -11,13 +11,15 @@ const FINDING_TITLES = {
   command_failed: "Commands failed",
   test_failed: "Test failures recorded",
   business_outcome_failed: "Reported business outcomes failed",
-  possible_tool_loop: "Repeated identical tool calls",
+  negative_feedback_recorded: "Thumbs-down feedback recorded",
+  possible_tool_loop: "Earlier repeated-call heuristic",
   required_step_missing: "Required evidence missing",
   prohibited_tool_used: "Prohibited tool used",
   response_schema_invalid: "Responses failed the JSON requirement",
   run_status_unknown: "Run outcome unavailable",
   response_not_evaluable: "Response unavailable for evaluation",
   event_capture_partial: "Event capture reached its limit",
+  source_capture_partial: "Local history incomplete",
   tool_outcomes_incomplete: "Tool outcome records incomplete",
 };
 
@@ -109,7 +111,7 @@ export function Insights({ url, onOpenRuns, onAnalysisComplete, onData = null, c
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>{mode !== "home" && <><div className="text-xs font-mono" style={{ color: C.green }}>RECORDED EVIDENCE</div><h2 className="text-lg font-semibold mt-1">What needs attention</h2></>}
           <p className="text-sm mt-2" style={{ color: C.sub }}>{analysisState.status === "completed"
-            ? `${issues.length} recorded issue ${issues.length === 1 ? "type" : "types"} across ${data.scope.analyzedRuns.toLocaleString()} of ${data.scope.availableRuns.toLocaleString()} runs in this analysis snapshot. ${data.scope.partialRuns ? `${data.scope.partialRuns} run histories contain only a recorded prefix. ` : ""}${issues.length ? "Select one to inspect what happened and what to do next." : evidenceGaps.length || data.scope.partialRuns ? "Review incomplete evidence before drawing conclusions." : "No recorded issue needs inspection in this captured scope."}`
+            ? `${issues.length} recorded issue ${issues.length === 1 ? "type" : "types"}. Analysis covers ${data.scope.analyzedRuns.toLocaleString()} of ${data.scope.availableRuns.toLocaleString()} runs in this snapshot. ${data.scope.partialRuns ? `${data.scope.partialRuns} run histories contain only a recorded prefix. ` : ""}${issues.length ? "Select one to inspect what happened and what to do next." : evidenceGaps.length || data.scope.partialRuns ? "Review incomplete evidence before drawing conclusions." : "No recorded issue needs inspection in this captured scope."}`
             : `${capturedRuns.toLocaleString()} captured run${capturedRuns === 1 ? "" : "s"}. Run local analysis to find recorded issues.`}</p>
         </div>
         {analysisState.status === "completed" && <button disabled={running} onClick={runAnalysis} className="border px-3 py-2 text-xs" style={{ borderColor: C.green, color: C.green }}>{running ? "Analyzing…" : "Refresh local analysis"}</button>}

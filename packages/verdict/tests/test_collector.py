@@ -262,6 +262,55 @@ def test_agent_batch_uses_configured_tenant_and_replays_exactly(tmp_path: Path) 
     assert bundle.events[0].trace_id == trace.trace_id
 
 
+def test_collector_replays_mixed_published_and_current_agent_envelopes(tmp_path: Path) -> None:
+    service, storage, _receipts = _service()
+    published = json.loads(_agent_record(tmp_path, trace_id="old"))
+    published["schema"] = "verdict-capture-v1"
+    for turn in published["record"]["batch"]["turns"]:
+        turn.pop("progress_redacted", None)
+    current = _agent_record(tmp_path, trace_id="new")
+    assert json.loads(current)["schema"] == "verdict-capture-v2"
+    body = json.dumps(published).encode() + b"\n" + current
+
+    first = service.ingest("mixed-agent-envelopes", "producer-1", body)
+    replay = service.ingest("mixed-agent-envelopes", "producer-1", body)
+
+    assert replay == first
+    assert _decode(first)["accepted"] == 2
+    assert {bundle.run.run_id for bundle in storage.list_agent_run_bundles(TENANT)} == {
+        "run-old", "run-new"}
+
+
+@pytest.mark.parametrize("malformed_schema", [[], {}, None, 2])
+def test_collector_rejects_nontext_schema_without_losing_valid_sibling(
+    tmp_path: Path, malformed_schema: object,
+) -> None:
+    service, storage, _receipts = _service()
+    invalid = json.dumps({"schema": malformed_schema, "kind": "agent",
+                          "record": {}}).encode() + b"\n"
+    result = _decode(service.ingest("malformed-schema", "producer-1",
+                                    invalid + _agent_record(tmp_path)))
+    assert result["accepted"] == 1
+    assert result["rejected"] == 1
+    assert result["results"][0]["error"] == "invalid_record"
+    assert len(storage.list_agent_run_bundles(TENANT)) == 1
+
+
+@pytest.mark.parametrize("malformed_kind", [[], {}, None, 2])
+def test_collector_rejects_nontext_kind_without_losing_valid_sibling(
+    tmp_path: Path, malformed_kind: object,
+) -> None:
+    service, storage, _receipts = _service()
+    invalid = json.dumps({"schema": "verdict-capture-v1", "kind": malformed_kind,
+                          "record": {}}).encode() + b"\n"
+    result = _decode(service.ingest("malformed-kind", "producer-1",
+                                    invalid + _agent_record(tmp_path)))
+    assert result["accepted"] == 1
+    assert result["rejected"] == 1
+    assert result["results"][0]["error"] == "invalid_record"
+    assert len(storage.list_agent_run_bundles(TENANT)) == 1
+
+
 def test_collector_reapplies_field_redaction_to_untrusted_agent_records(tmp_path: Path) -> None:
     service, storage, _receipts = _service()
     payload = json.loads(_agent_record(tmp_path))

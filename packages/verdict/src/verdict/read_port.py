@@ -23,8 +23,8 @@ from verdict.evidence import (
 from verdict.storage.base import Storage
 
 AGENT_RUN_READ_SCHEMA_VERSION = "verdict.agent-run-read.v1"
-AGENT_ANALYSIS_VERSION = "verdict.agent-analysis.v1"
-SUPPORTED_AGENT_ANALYSIS_VERSIONS = frozenset({AGENT_ANALYSIS_VERSION})
+AGENT_ANALYSIS_VERSION = "verdict.agent-analysis.v2"
+SUPPORTED_AGENT_ANALYSIS_VERSIONS = frozenset({"verdict.agent-analysis.v1", AGENT_ANALYSIS_VERSION})
 
 _ERROR_CODES = frozenset(
     {

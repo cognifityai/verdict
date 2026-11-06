@@ -97,8 +97,8 @@ class VerdictReadError(RuntimeError):
     def __init__(self, code: str) -> None: ...
 ```
 
-The exact schema version is `verdict.agent-run-read.v1`; the initial analysis
-version is `verdict.agent-analysis.v1`. A V1 class or protocol does not gain
+The exact schema version is `verdict.agent-run-read.v1`; the current analysis
+version is `verdict.agent-analysis.v2`. A V1 class or protocol does not gain
 fields or methods. A future shape or operation gets V2 types, a V2 protocol,
 and a V2 serializer. Finding semantics remain owned by the shared
 `analyze_agent_run` implementation rather than being copied into this adapter.
@@ -147,7 +147,7 @@ time; `unknown` may remain open.
 
 `schema_version` must equal `verdict.agent-run-read.v1`.
 `analysis_version` must be a member of the Verdict release's explicit supported
-analysis-version set, initially only `verdict.agent-analysis.v1`. Schema and
+analysis-version set, currently `verdict.agent-analysis.v1` and `verdict.agent-analysis.v2`. Schema and
 analysis version strings are 1 through 64 ASCII bytes matching
 `[a-z0-9.-]+`. The supported analysis-version set is monotonic for schema V1:
 a Verdict release may add a version but cannot remove or reinterpret an older

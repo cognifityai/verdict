@@ -85,21 +85,65 @@ def test_day_explanation_preview_and_run_are_bounded_replay_safe_and_tenant_scop
         run_day_explanation(url, tenant="local", config={**config, "planFingerprint": preview["planFingerprint"]},
                             confirm_external_egress=False, provider_adapter=provider)
     assert provider.calls == 0
-    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+    approved = {**config, "planFingerprint": preview["planFingerprint"],
+                "maxEstimatedUsd": preview["upperStaticListPriceUsd"]}
     result = run_day_explanation(url, tenant="local", config=approved,
                                  confirm_external_egress=True, provider_adapter=provider)
     assert result["status"] == "completed"
     assert provider.calls == 1
+    replay_preview = preview_day_explanation(url, tenant="local", config=config)
+    assert replay_preview["savedResult"] == result
+    assert "savedResult" not in preview_day_explanation(url, tenant="other", config=config)
     assert "private-canary" not in str(provider.requests[0].messages)
     assert "private-session-id" not in str(provider.requests[0].messages)
     assert run_day_explanation(url, tenant="local", config=approved,
                                confirm_external_egress=True, provider_adapter=provider) == result
     assert provider.calls == 1
     _seed(path, total=901, source_kind="private-source-canary", model="private-model-canary")
+    assert "savedResult" not in preview_day_explanation(url, tenant="local", config=config)
     with pytest.raises(ValueError, match="stale"):
         run_day_explanation(url, tenant="local", config=approved,
                             confirm_external_egress=True, provider_adapter=provider)
     assert provider.calls == 1
+
+
+def test_day_explanation_rejects_missing_or_insufficient_static_spend_limit_before_egress(tmp_path):
+    path = tmp_path / "spend.db"
+    day = _seed(path)
+    url = f"sqlite:///{path}"
+    preview = preview_day_explanation(url, tenant="local", config={"day": day, "provider": "anthropic"})
+    bound = preview["upperStaticListPriceUsd"]
+    approved = {"day": day, "provider": "anthropic", "planFingerprint": preview["planFingerprint"]}
+    provider = RecordingProvider()
+    for cap in (None, 0, -1, float("nan"), float("inf"), True, "1", bound / 2):
+        config = {**approved, **({} if cap is None else {"maxEstimatedUsd": cap})}
+        with pytest.raises(ValueError):
+            run_day_explanation(url, tenant="local", config=config,
+                                confirm_external_egress=True, provider_adapter=provider)
+    assert provider.calls == 0
+    result = run_day_explanation(url, tenant="local",
+                                 config={**approved, "maxEstimatedUsd": bound},
+                                 confirm_external_egress=True, provider_adapter=provider)
+    assert result["status"] == "completed"
+    assert provider.calls == 1
+
+
+def test_custom_endpoint_has_no_day_explanation_list_price(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://synthetic-judge.example/v1")
+    path = tmp_path / "custom-price.db"
+    day = _seed(path)
+    url = f"sqlite:///{path}"
+    config = {"day": day, "provider": "anthropic"}
+    preview = preview_day_explanation(url, tenant="local", config=config)
+    assert preview["plannedCalls"] == 1
+    assert preview["upperStaticListPriceUsd"] is None
+    provider = RecordingProvider()
+    with pytest.raises(ValueError, match="estimated-spend"):
+        run_day_explanation(url, tenant="local",
+                            config={**config, "planFingerprint": preview["planFingerprint"],
+                                    "maxEstimatedUsd": 100},
+                            confirm_external_egress=True, provider_adapter=provider)
+    assert provider.calls == 0
 
 
 def test_day_explanation_errors_and_reserved_attempt_do_not_retry(tmp_path):
@@ -108,13 +152,15 @@ def test_day_explanation_errors_and_reserved_attempt_do_not_retry(tmp_path):
     url = f"sqlite:///{path}"
     config = {"day": day, "provider": "anthropic"}
     preview = preview_day_explanation(url, tenant="local", config=config)
-    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+    approved = {**config, "planFingerprint": preview["planFingerprint"],
+                "maxEstimatedUsd": preview["upperStaticListPriceUsd"]}
     provider = RecordingProvider(RuntimeError("private-provider-error"))
     result = run_day_explanation(url, tenant="local", config=approved,
                                  confirm_external_egress=True, provider_adapter=provider)
     assert result["status"] == "error"
     assert result["error"] == "RuntimeError"
     assert "private-provider-error" not in str(result)
+    assert preview_day_explanation(url, tenant="local", config=config)["savedResult"] == result
     assert run_day_explanation(url, tenant="local", config=approved,
                                confirm_external_egress=True, provider_adapter=provider) == result
     assert provider.calls == 1
@@ -130,7 +176,8 @@ def test_day_explanation_errors_and_reserved_attempt_do_not_retry(tmp_path):
     cleanup_preview = preview_day_explanation(cleanup_url, tenant="local", config=cleanup_config)
     cleanup_provider = RecordingProvider()
     cleanup_provider._client = BrokenClose()
-    cleanup_approved = {**cleanup_config, "planFingerprint": cleanup_preview["planFingerprint"]}
+    cleanup_approved = {**cleanup_config, "planFingerprint": cleanup_preview["planFingerprint"],
+                        "maxEstimatedUsd": cleanup_preview["upperStaticListPriceUsd"]}
     saved = run_day_explanation(cleanup_url, tenant="local", config=cleanup_approved,
                                 confirm_external_egress=True, provider_adapter=cleanup_provider)
     assert saved["status"] == "completed"
@@ -150,6 +197,7 @@ def test_day_explanation_errors_and_reserved_attempt_do_not_retry(tmp_path):
         config={**reserved_config, "planFingerprint": reserved_preview["planFingerprint"]},
         confirm_external_egress=True, provider_adapter=provider)
     assert withheld["status"] == "outcome_unknown"
+    assert preview_day_explanation(reserved_url, tenant="local", config=reserved_config)["savedResult"] == withheld
     assert provider.calls == 1
 
 
@@ -179,9 +227,15 @@ def test_day_explanation_routes_require_setup_authorization(tmp_path, monkeypatc
             assert unapproved.status_code == 400
             approved = {"day": day, "provider": "anthropic",
                         "planFingerprint": preview.json()["planFingerprint"],
+                        "maxEstimatedUsd": preview.json()["upperStaticListPriceUsd"],
                         "confirmExternalEgress": True}
             denied_run = await client.post("/api/usage/explain/run", json=approved)
             assert denied_run.status_code == 403
+            over_budget = await client.post("/api/usage/explain/run",
+                headers={"X-Verdict-Setup": token},
+                json={**approved, "maxEstimatedUsd": approved["maxEstimatedUsd"] / 2})
+            assert over_budget.status_code == 400
+            assert provider.calls == 0
             monkeypatch.setattr("verdict.dashboard.day_explanation._provider_available", lambda _provider: False)
             unavailable = await client.post("/api/usage/explain/run",
                 headers={"X-Verdict-Setup": token}, json=approved)
@@ -197,6 +251,11 @@ def test_day_explanation_routes_require_setup_authorization(tmp_path, monkeypatc
             replay = await client.post("/api/usage/explain/run",
                 headers={"X-Verdict-Setup": token}, json=approved)
             assert replay.json() == response.json()
+            assert provider.calls == 1
+            monkeypatch.delenv("ANTHROPIC_API_KEY")
+            saved_preview = await client.post("/api/usage/explain/preview",
+                headers={"X-Verdict-Setup": token}, json={"day": day, "provider": "anthropic"})
+            assert saved_preview.json()["savedResult"] == response.json()
             assert provider.calls == 1
 
     asyncio.run(exercise())

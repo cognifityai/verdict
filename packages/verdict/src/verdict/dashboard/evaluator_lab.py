@@ -24,8 +24,9 @@ from verdict.agent_judgment import (
     turn_evidence_fingerprint,
     turn_evidence_reason,
 )
+from verdict.local_recent_facts import trace_evidence_fingerprint
 from verdict.monitor_inputs import LOCAL_TENANT
-from verdict.pricing import PRICING_LAST_VERIFIED, compute_cost_usd
+from verdict.pricing import PRICING_LAST_VERIFIED, compute_cost_usd, compute_exact_list_price_usd
 from verdict.redaction import redact_structure
 from verdict.schema import Judgment, JudgmentStatus, Trace
 from verdict.storage.base import Storage
@@ -46,6 +47,11 @@ _DEFAULT_ENDPOINT = {
 }
 _MAX_EVALUATION_TRACES = 10_000
 _EVALUATION_LOCK = threading.Lock()
+
+
+def _uses_public_list_price(provider: str) -> bool:
+    endpoint_key = _PROVIDER_ENDPOINT_ENV.get(provider)
+    return provider != "jev" and not (endpoint_key and os.environ.get(endpoint_key))
 
 
 def _destination(provider: str, identity: dict[str, Any]) -> tuple[str, str]:
@@ -279,6 +285,23 @@ def _output_maximum(provider: str, model: str, max_output: int, calls: int) -> i
     return output_token_ceiling(max_output, model) * calls
 
 
+def _upper_static_judge_cost(provider, model, max_output, rubric, evidence) -> float | None:
+    """Price the exact text prompts Judge.score will send, with framing slack."""
+    if not _uses_public_list_price(provider):
+        return None
+    from verdict_eval.judge import SYSTEM_PROMPT, _user_prompt
+
+    effective = _judge(_IdentityOnlyProvider(provider), model, rubric,
+                       max_output)._effective_rubric(None)
+    system_bytes = len(SYSTEM_PROMPT.encode("utf-8"))
+    input_bound = sum(
+        system_bytes + len(_user_prompt(query, response, None, effective, tools).encode("utf-8"))
+        + 1_024 for query, response, tools in evidence
+    )
+    output_bound = _output_maximum(provider, model, max_output, len(evidence))
+    return compute_exact_list_price_usd(model, input_bound, output_bound)
+
+
 def _rubric_summary(rubric, identity):
     effective = identity["expected_dimensions"]
     effective_names = set(effective)
@@ -460,6 +483,11 @@ def _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_ou
         "estimatedMaximumCostUsd": (None if provider == "jev" else
                                     compute_cost_usd(model, input_estimate,
                                                      _output_maximum(provider, model, max_output, len(selected)))),
+        "upperStaticListPriceUsd": _upper_static_judge_cost(
+            provider, model, max_output, rubric,
+            [(turn.user_request_redacted or "", turn.final_response_redacted or "",
+              counts.prompt_block() if counts else None) for turn, counts in selected],
+        ),
         "costIsStaticEstimate": provider != "jev", "externalEgressRequired": True,
         "destination": destination,
     }
@@ -558,6 +586,11 @@ def preview_evaluation(
         "maximumOutputTokens": output_maximum,
         "estimatedMaximumCostUsd": (None if provider == "jev" else
                                     compute_cost_usd(model, input_estimate, output_maximum)),
+        "upperStaticListPriceUsd": _upper_static_judge_cost(
+            provider, model, max_output, rubric,
+            [(trace.prompt_redacted or "", trace.response_redacted or "", None)
+             for trace in selected],
+        ),
         "costIsStaticEstimate": provider != "jev",
         "externalEgressRequired": True,
         "destination": destination,
@@ -653,17 +686,20 @@ def _execute_evaluation(
             errors += 1
             continue
         try:
-            storage.insert_judgment(judge.judge(
+            result = judge.judge(
                 query=current.prompt_redacted or "",
                 response=current.response_redacted or "",
                 trace_id=trace.trace_id,
-            ))
+            )
+            result.evaluated_trace_fingerprint = trace_evidence_fingerprint(current)
+            storage.insert_judgment(result)
             completed += 1
         except Exception as exc:
             storage.insert_judgment(Judgment(
                 trace_id=trace.trace_id,
                 status=JudgmentStatus.ERROR,
                 error=redact_structure(str(exc)) or "judge error",
+                evaluated_trace_fingerprint=trace_evidence_fingerprint(current),
                 **identity,
             ))
             errors += 1
@@ -833,6 +869,10 @@ def preview_calibration(*, path: str | Path, config: dict[str, Any]) -> dict[str
             (len(example.query) + len(example.response) + len(example.context or "")) / 4
         ) + 400
     maximum_output = _output_maximum(provider_name, model, max_output, len(examples))
+    static_bound = _upper_static_judge_cost(
+        provider_name, model, max_output, _rubric,
+        [(example.query, example.response, None) for example in examples],
+    )
     return {
         "setName": set_name,
         "examples": len(examples),
@@ -840,6 +880,7 @@ def preview_calibration(*, path: str | Path, config: dict[str, Any]) -> dict[str
         "plannedCalls": len(examples),
         "estimatedMaximumCostUsd": (None if provider_name == "jev" else
                                     compute_cost_usd(model, estimated_input, maximum_output)),
+        "upperStaticListPriceUsd": static_bound,
         "externalEgressRequired": True,
         "rawLabelsPersisted": False,
         "planFingerprint": fingerprint,
@@ -866,6 +907,15 @@ def execute_calibration(
     )
     if config.get("planFingerprint") is not None and config["planFingerprint"] != fingerprint:
         raise ValueError("calibration plan does not match the approved preview")
+    if "maxEstimatedUsd" in config:
+        from verdict.dashboard.spend_limit import within_static_spend_limit
+
+        bound = _upper_static_judge_cost(
+            provider_name, model, max_output, rubric,
+            [(example.query, example.response, None) for example in examples],
+        )
+        if not within_static_spend_limit(bound, config["maxEstimatedUsd"]):
+            raise ValueError("calibration exceeds estimated-spend limit")
     from verdict_eval.judge_health import evaluate_judge_health
     judge = _judge(
         provider or _provider(provider_name), model, rubric, max_output,

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 
 const C = { border: "#26332e", sub: "#94a39d", amber: "#f2b84b", red: "#ff6b6b", green: "#4ee1aa" };
 const FOCUS = [
-  ["failure", "What went wrong?"], ["tokens", "Why these tokens?"],
+  ["failure", "What should I verify?"], ["tokens", "Why these tokens?"],
   ["latency", "What was slow?"], ["improvement", "What should I check next?"],
 ];
 const UNAVAILABLE = {
@@ -22,6 +22,16 @@ const UNAVAILABLE = {
 const unavailableMessage = (reason) => typeof reason === "string" && Object.hasOwn(UNAVAILABLE, reason)
   ? UNAVAILABLE[reason]
   : "The selected evidence is incomplete or unavailable. Inspect the recorded facts or choose a smaller selection.";
+
+export function UnverifiedAiResponse({ answer }) {
+  return <div>
+    <div className="font-semibold">Unverified AI response · call completed</div>
+    <p className="mt-2" style={{ color: C.sub }}>Model statements may be wrong. Check the recorded facts and linked evidence before acting.</p>
+    <details className="mt-2"><summary className="cursor-pointer">Read unverified response</summary>
+      <p className="mt-2 whitespace-pre-wrap break-words">{answer}</p>
+    </details>
+  </div>;
+}
 
 export function EvidenceExplain({ root, scope, runId = null, turnId = null, eventId = null,
   traceId = null, spanId = null, sessionId = null, sourceKind = null, onApplyDraft = null,
@@ -58,6 +68,7 @@ export function EvidenceExplain({ root, scope, runId = null, turnId = null, even
     ...(versionId && clusterId ? { versionId, clusterId } : {}) };
   const key = JSON.stringify(config);
   const current = preview && previewKey === key;
+  const saved = result && current && resultKey === key;
   useEffect(() => {
     setApproved(false);
     setPreview(null);
@@ -84,7 +95,7 @@ export function EvidenceExplain({ root, scope, runId = null, turnId = null, even
     {open && <div className="border p-3 mt-2 space-y-3" style={{ borderColor: C.border }}>
       <p style={{ color: C.sub }}>{draftKind === "cluster_description" ? "Optional label and description from this cluster’s bounded representatives. Review them in the existing rename form; no cluster changes automatically." : draftKind === "rubric" ? "Optional criterion draft from the selected bounded evidence. Review and edit it in the evaluator form; no evaluation runs automatically." : scope === "setup" ? draftKind === "cohort" ? "Optional draft from aggregate eligible-call counts only. It fills comparison controls for your review; preview and activation remain separate decisions." : "Optional draft from source eligibility only. Review its suggested check in setup or comparison; running and activation remain separate decisions." : "Optional interpretation of the selected evidence. Local facts remain available without a key."} Nothing is sent until you review the exact context and approve one call.</p>
       <div className="grid sm:grid-cols-2 gap-2">{scope !== "setup" && !["rubric", "cluster_description"].includes(draftKind) && <label>Question<select value={focus} onChange={(event) => { setFocus(event.target.value); setApproved(false); }} className="block border p-2 mt-1 w-full bg-transparent">{FOCUS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}<label>Provider<select value={provider} onChange={(event) => { setProvider(event.target.value); setApproved(false); }} className="block border p-2 mt-1 w-full bg-transparent"><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select></label></div>
-      <button type="button" className="border px-3 py-2" disabled={!auth || busy} onClick={async () => { const data = await post("/api/explain/preview", config); if (data) { setPreview(data); setPreviewKey(key); setApproved(false); setResult(null); } }}>Preview evidence and cost</button>
+      <button type="button" className="border px-3 py-2" disabled={!auth || busy} onClick={async () => { const data = await post("/api/explain/preview", config); if (data) { setPreview(data); setPreviewKey(key); setApproved(false); setResult(data.savedResult || null); setResultKey(data.savedResult ? key : null); } }}>Preview evidence and cost</button>
       {preview && !current && <p style={{ color: C.amber }}>Selection changed. Preview again.</p>}
       {current && <div className="border p-3 space-y-2" style={{ borderColor: C.border }}>
         {preview.plannedCalls !== 1 ? <p role="status" style={{ color: C.amber }}>AI explanation unavailable. {unavailableMessage(preview.evidencePreview?.reason)} No data was sent.</p> : <>
@@ -93,12 +104,21 @@ export function EvidenceExplain({ root, scope, runId = null, turnId = null, even
         <details><summary className="cursor-pointer">Review exact redacted context and instructions</summary><pre className="whitespace-pre-wrap break-words max-h-72 overflow-auto mt-2">{JSON.stringify(preview.messages, null, 2)}</pre></details>
         <label className="block">Maximum approved static estimate (USD)<input type="number" min="0.001" max="100" step="0.001" value={budget} onChange={(event) => setBudget(event.target.value)} className="block border p-2 mt-1 w-32 bg-transparent" /></label>
         <label className="flex gap-2"><input type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} disabled={!current || preview.plannedCalls !== 1 || !preview.providerAvailable} />I approve one call with this exact context to {preview.destination}.</label>
-        <button type="button" className="border px-3 py-2" disabled={!approved || !withinBudget || !configured || !preview.providerAvailable || busy || preview.plannedCalls !== 1} onClick={async () => { const data = await post("/api/explain/run", { ...config, planFingerprint: preview.planFingerprint, maxEstimatedUsd: cap, confirmExternalEgress: true }); if (data) { setResult(data); setResultKey(key); } }}>{draftKind === "cluster_description" ? "Draft cluster description" : draftKind === "rubric" ? "Draft rubric criterion" : scope === "setup" ? draftKind === "cohort" ? "Draft cohort" : "Draft setup" : "Explain selected evidence"}</button>
+        <button type="button" className="border px-3 py-2" disabled={Boolean(saved) || !approved || !withinBudget || !configured || !preview.providerAvailable || busy || preview.plannedCalls !== 1} onClick={async () => { const data = await post("/api/explain/run", { ...config, planFingerprint: preview.planFingerprint, maxEstimatedUsd: cap, confirmExternalEgress: true }); if (data) { setResult(data); setResultKey(key); } }}>{draftKind === "cluster_description" ? "Draft cluster description" : draftKind === "rubric" ? "Draft rubric criterion" : scope === "setup" ? draftKind === "cohort" ? "Draft cohort" : "Draft setup" : "Explain selected evidence"}</button>
+        {saved && <p role="status" style={{ color: C.sub }}>No new provider call will be made for this exact preview. The saved outcome is shown below.</p>}
         {!configured && <p style={{ color: C.amber }}>Provider key is not configured for this dashboard process.</p>}
         {!preview.providerAvailable && <p style={{ color: C.amber }}>This provider needs the Verdict eval package and its SDK installed in the dashboard environment.</p>}
         </>}
       </div>}
-      {result && current && resultKey === key && <div role="status" className="border p-3 whitespace-pre-wrap" style={{ borderColor: C.border }}><div className="font-semibold">{draftKind === "cluster_description" ? "AI cluster draft" : draftKind === "rubric" ? "AI rubric draft" : scope === "setup" ? draftKind === "cohort" ? "AI cohort draft" : "AI setup draft" : "AI interpretation"} · {result.status}</div>{result.draft ? <><p className="mt-2">{result.draft.why}</p><p className="mt-2">{draftKind === "cluster_description" ? `${result.draft.displayName}: ${result.draft.description}` : draftKind === "rubric" ? `${result.draft.name}: ${result.draft.description}` : draftKind === "cohort" ? `Grouping: ${result.draft.grouping} · historical reference share: ${result.draft.referenceShare}% · minimum reference/current: ${result.draft.minimumReference}/${result.draft.minimumCurrent} · prospective target: ${result.draft.prospectiveTarget}` : `Check: ${result.draft.check} · grouping: ${result.draft.grouping} · suggested interval: ${result.draft.intervalHours} hours`}</p>{onApplyDraft && <button type="button" className="border px-3 py-2 mt-3" onClick={() => onApplyDraft(result.draft)}>{draftActionLabel}</button>}</> : result.answer || result.error || "No explanation available"}</div>}
+      {result && current && resultKey === key && <div role="status" className="border p-3 whitespace-pre-wrap" style={{ borderColor: C.border }}>
+        {result.draft ? <>
+          <div className="font-semibold">{draftKind === "cluster_description" ? "AI cluster draft" : draftKind === "rubric" ? "AI rubric draft" : scope === "setup" ? draftKind === "cohort" ? "AI cohort draft" : "AI setup draft" : "AI draft"} · {result.status}</div>
+          <p className="mt-2">{result.draft.why}</p>
+          <p className="mt-2">{draftKind === "cluster_description" ? `${result.draft.displayName}: ${result.draft.description}` : draftKind === "rubric" ? `${result.draft.name}: ${result.draft.description}` : draftKind === "cohort" ? `Grouping: ${result.draft.grouping} · historical reference share: ${result.draft.referenceShare}% · minimum reference/current: ${result.draft.minimumReference}/${result.draft.minimumCurrent} · prospective target: ${result.draft.prospectiveTarget}` : `Check: ${result.draft.check} · grouping: ${result.draft.grouping} · suggested interval: ${result.draft.intervalHours} hours`}</p>
+          {onApplyDraft && <button type="button" className="border px-3 py-2 mt-3" onClick={() => onApplyDraft(result.draft)}>{draftActionLabel}</button>}
+        </> : result.answer ? <UnverifiedAiResponse answer={result.answer} />
+          : <p style={{ color: C.amber }}>{result.error || "No explanation available"}</p>}
+      </div>}
       {error && <p role="alert" style={{ color: C.red }}>{error}</p>}
     </div>}
   </div>;

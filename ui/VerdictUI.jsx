@@ -3,8 +3,8 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
 import {
-  Activity, AlertTriangle, BarChart3, CheckCircle2, Layers, Scale, Search,
-  Shield, Signal, Terminal, Gauge, Filter, X, Sparkles, Eye, RefreshCw, Info,
+  Activity, AlertTriangle, BarChart3, CheckCircle2, Scale, Search,
+  Shield, Signal, Terminal, Gauge, Filter, X, Eye, RefreshCw, Info,
 } from "lucide-react";
 import { dimensionAxisLabel, dimensionLabel } from "./dimension-labels.js";
 import { providerPresentation } from "./provider-presentation.js";
@@ -32,192 +32,12 @@ import {
 } from "./dashboard-route.mjs";
 import { formatLatency } from "./presentation-format.mjs";
 
-// Embedded synthetic sample data. This keeps the static dashboard renderable when
-// no live API is reachable. It is not a benchmark, experiment result, or claim
-// about any provider.
-const SEED = /* @__PURE__ */ (() => {
-  const tsRows = [
-    { hour: 0, anthropic_lat: 2.1, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.4, openai_err: 0, openai_n: 12, google_lat: 2.8, google_err: 0, google_n: 12 },
-    { hour: 1, anthropic_lat: 2.0, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.5, openai_err: 0, openai_n: 12, google_lat: 2.9, google_err: 0, google_n: 12 },
-    { hour: 2, anthropic_lat: 2.2, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.3, openai_err: 0, openai_n: 12, google_lat: 3.0, google_err: 0, google_n: 12 },
-    { hour: 3, anthropic_lat: 2.1, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.6, openai_err: 0, openai_n: 12, google_lat: 2.7, google_err: 0, google_n: 12 },
-    { hour: 4, anthropic_lat: 2.4, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.4, openai_err: 0, openai_n: 12, google_lat: 3.2, google_err: 0, google_n: 12 },
-    { hour: 5, anthropic_lat: 2.5, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.5, openai_err: 0, openai_n: 12, google_lat: 3.0, google_err: 0, google_n: 12 },
-    { hour: 6, anthropic_lat: 2.4, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.6, openai_err: 0, openai_n: 12, google_lat: 3.1, google_err: 0, google_n: 12 },
-    { hour: 7, anthropic_lat: 2.3, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.5, openai_err: 0, openai_n: 12, google_lat: 3.0, google_err: 0, google_n: 12 },
-  ];
-  const metric = (calls, failedCalls, inputTokens, outputTokens, costUsd, averageLatencyMs) => ({
-    calls, errorRecordedCalls: failedCalls,
-    endedNoErrorRecordedCalls: calls - failedCalls, unfinishedCalls: 0,
-    inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
-    tokenKnownCalls: calls, costUsd, costKnownCalls: calls,
-    averageLatencyMs, latencyKnownCalls: calls,
-  });
-  return {
-    meta: {
-      runStart: 'sample-data', durationHours: 8, totalTraces: 96, monitorEligibleCalls: 96, totalJudged: 48,
-      totalCost: 0.42, totalCostStatus: 'complete', regressionHour: null,
-      providers: 3, clusters: 4, workload: 'sample-service',
-    },
-    managementReport: {
-      schema: "management-report-v2",
-      period: { days: 30, startDate: "2026-08-13", endDate: "2026-09-11" },
-      scope: {
-        firstCapturedAt: "2026-09-04T08:00:00+00:00", latestCapturedAt: "2026-09-11T20:00:00+00:00",
-        ...metric(96, 1, 7230, 28200, 0.42, 2560),
-        latencySampledCalls: 96, p50LatencyMs: 2480, p95LatencyMs: 3220,
-        identifiedApplications: 2, unattributedCalls: 0, judgedCalls: 48, judgeErrorCalls: 0,
-      },
-      timeline: { availableDates: 8, shownDates: 8, rows:
-        [6, 9, 12, 10, 15, 17, 11, 16].map((calls, index) => ({
-          date: `2026-09-${String(index + 4).padStart(2, "0")}`, calls,
-          totalTokens: calls * 369 + (index === 7 ? 6 : 0), tokenKnownCalls: calls,
-        })),
-      },
-      applications: { availableRows: 2, shownRows: 2, rows: [
-        { name: "support-assistant", environment: "production", attributed: true, ...metric(60, 1, 4500, 17600, 0.27, 2380) },
-        { name: "engineering-copilot", environment: "production", attributed: true, ...metric(36, 0, 2730, 10600, 0.15, 2860) },
-      ] },
-      models: { availableRows: 3, shownRows: 3, rows: [
-        { provider: "anthropic", model: "sample-model-a", ...metric(32, 0, 2400, 9600, 0.19, 2250) },
-        { provider: "openai", model: "sample-model-b", ...metric(32, 0, 2380, 8200, 0.08, 2480) },
-        { provider: "google", model: "sample-model-c", ...metric(32, 1, 2450, 10400, 0.15, 2960) },
-      ] },
-    },
-    evaluation: {
-      status: "selected", selectedId: "sample-evaluator",
-      selectedIdentity: { id: "sample-evaluator", label: "sample-judge · sample-rubric v1", complete: true },
-      availableIdentities: [{ id: "sample-evaluator", label: "sample-judge · sample-rubric v1", complete: true }],
-    },
-    scoreCoverage: { pass: 223, fail: 17, unclear: 0, missing: 0, error: 0, evaluable: 240 },
-    evaluatorHealth: [{
-      id: "sample-health", evaluatedAt: "sample-data", sentinelSetName: "sample-anchor-v1",
-      correctExamples: 27, totalExamples: 30, exampleAgreement: 90,
-      exampleConfidenceLow: 74.4, exampleConfidenceHigh: 96.5,
-      correctLabels: 135, totalLabels: 150, labelAgreement: 90,
-      status: "healthy", errorCount: 0, methodVersion: "2",
-    }],
-    providers: [
-      { key: 'anthropic', label: 'Anthropic sample', model: 'sample-model-a', n: 32, errors: 0, errorRate: 0, avgLatency: 2.25, inTok: 2400, outTok: 9600, cost: 0.19, passRate: 82, judged: 16 },
-      { key: 'openai', label: 'OpenAI sample', model: 'sample-model-b', n: 32, errors: 0, errorRate: 0, avgLatency: 2.48, inTok: 2380, outTok: 8200, cost: 0.08, passRate: 96, judged: 16 },
-      { key: 'google', label: 'Google sample', model: 'sample-model-c', n: 32, errors: 1, errorRate: 3.1, avgLatency: 2.96, inTok: 2450, outTok: 10400, cost: 0.15, passRate: 94, judged: 16 },
-    ],
-    clusters: [
-      { cluster_id: 'support', n: 28 },
-      { cluster_id: 'coding', n: 26 },
-      { cluster_id: 'writing', n: 22 },
-      { cluster_id: 'analysis', n: 20 },
-    ],
-    clusterHealth: {
-      status: 'ready', nTraces: 96, nClusters: 4, medianClusterSize: 24,
-      clustersMeetingSampleFloor: 4, minSampleSize: 12, messages: [],
-    },
-    monitor: {
-      active: {
-        state: "active",
-        policyState: "active",
-        policy: {
-          prospective_target: 12,
-          grouping_mode: "none",
-          evaluator_fingerprint: "sample-evaluator",
-        },
-        snapshot: {
-          manifest: {
-            reference_unit_ids: [
-              "sample-reference-0", "sample-reference-1", "sample-reference-2", "sample-reference-3",
-              "sample-reference-4", "sample-reference-5", "sample-reference-6", "sample-reference-7",
-              "sample-reference-8", "sample-reference-9", "sample-reference-10", "sample-reference-11",
-            ],
-            current_unit_ids: [
-              "sample-current-0", "sample-current-1", "sample-current-2", "sample-current-3",
-              "sample-current-4", "sample-current-5", "sample-current-6", "sample-current-7",
-              "sample-current-8", "sample-current-9", "sample-current-10", "sample-current-11",
-            ],
-            pending_evaluator_units: [],
-            prospective_open: false,
-            comparison_index: 1,
-          },
-          comparison: {
-            status: "alert",
-            alpha_threshold: 0.03,
-            metrics: [{
-              metric: "judge.completeness.pass",
-              reference_value: 1,
-              current_value: 0.5,
-              effect: -0.5,
-              p_adjusted: 0.008,
-              reference_n: 12,
-              current_n: 12,
-              alert: true,
-            }],
-            metric_coverage: [],
-            groups: [],
-            unseen_group_share: 0,
-            unassigned_group_share: 0,
-          },
-        },
-      },
-      candidate: null,
-    },
-    dimensionOverall: [
-      { dim: 'groundedness', passRate: 96, pass: 46, fail: 2, unclear: 0, tot: 48 },
-      { dim: 'relevance', passRate: 94, pass: 45, fail: 3, unclear: 0, tot: 48 },
-      { dim: 'completeness', passRate: 88, pass: 42, fail: 6, unclear: 0, tot: 48 },
-      { dim: 'safety', passRate: 98, pass: 47, fail: 1, unclear: 0, tot: 48 },
-      { dim: 'instruction_following', passRate: 90, pass: 43, fail: 5, unclear: 0, tot: 48 },
-    ],
-    tsRows,
-    passrate: [
-      { hour: 0, anthropic: 98, openai: 96, google: 95 },
-      { hour: 1, anthropic: 98, openai: 96, google: 95 },
-      { hour: 2, anthropic: 96, openai: 96, google: 94 },
-      { hour: 3, anthropic: 96, openai: 95, google: 95 },
-      { hour: 4, anthropic: 88, openai: 96, google: 94 },
-      { hour: 5, anthropic: 78, openai: 97, google: 94 },
-      { hour: 6, anthropic: 74, openai: 96, google: 93 },
-      { hour: 7, anthropic: 82, openai: 96, google: 94 },
-    ],
-    clusterPassrate: [],
-    haikuDim: [
-      { hour: 0, groundedness: 98, relevance: 98, completeness: 98, safety: 100, instruction_following: 98 },
-      { hour: 1, groundedness: 98, relevance: 98, completeness: 96, safety: 100, instruction_following: 98 },
-      { hour: 2, groundedness: 98, relevance: 96, completeness: 96, safety: 98, instruction_following: 96 },
-      { hour: 3, groundedness: 98, relevance: 96, completeness: 96, safety: 98, instruction_following: 96 },
-      { hour: 4, groundedness: 96, relevance: 92, completeness: 84, safety: 98, instruction_following: 86 },
-      { hour: 5, groundedness: 96, relevance: 90, completeness: 72, safety: 96, instruction_following: 78 },
-      { hour: 6, groundedness: 94, relevance: 88, completeness: 68, safety: 96, instruction_following: 74 },
-      { hour: 7, groundedness: 96, relevance: 90, completeness: 76, safety: 98, instruction_following: 80 },
-    ],
-    samples: [
-      { trace_id: 'sample-trace-001', provider: 'anthropic', request_model: 'sample-model-a', cluster_id: 'support', input_tokens: 42, output_tokens: 180, latency_ms: 2150, cost_usd: 0.003, finish_reason: 'end_turn', error: null, started_at: 'sample-data', prompt_redacted: 'Summarize the refund policy for a delayed shipment.', response_redacted: 'Sample response text shown for layout only. Connect the dashboard to a real Verdict database to inspect captured responses.', hour: 4.1, judgment: { judges: ['sample-judge'], dims: [
-        { name: 'groundedness', verdict: 'pass', reasoning: 'The sample response stays within the supplied context.' },
-        { name: 'relevance', verdict: 'pass', reasoning: 'The response addresses the support request.' },
-        { name: 'completeness', verdict: 'fail', reasoning: 'The response omits an important policy condition.' },
-        { name: 'safety', verdict: 'pass', reasoning: 'No unsafe content is present.' },
-        { name: 'instruction_following', verdict: 'fail', reasoning: 'The response did not follow the requested format.' },
-      ] } },
-      { trace_id: 'sample-trace-002', provider: 'openai', request_model: 'sample-model-b', cluster_id: 'coding', input_tokens: 35, output_tokens: 150, latency_ms: 2400, cost_usd: 0.001, finish_reason: 'end_turn', error: null, started_at: 'sample-data', prompt_redacted: 'Write a small retry helper with exponential backoff.', response_redacted: 'Sample code response placeholder.', hour: 4.2 },
-      { trace_id: 'sample-trace-003', provider: 'google', request_model: 'sample-model-c', cluster_id: 'writing', input_tokens: 28, output_tokens: 140, latency_ms: 3100, cost_usd: 0.002, finish_reason: 'end_turn', error: null, started_at: 'sample-data', prompt_redacted: 'Draft a concise release note for a dashboard update.', response_redacted: 'Sample writing response placeholder.', hour: 4.3 },
-      { trace_id: 'sample-trace-004', provider: 'anthropic', request_model: 'sample-model-a', cluster_id: 'analysis', input_tokens: 52, output_tokens: 170, latency_ms: 2250, cost_usd: 0.003, finish_reason: 'end_turn', error: null, started_at: 'sample-data', prompt_redacted: 'Compare two support-routing policies.', response_redacted: 'Sample analytical response placeholder.', hour: 5.1 },
-      { trace_id: 'sample-trace-005', provider: 'openai', request_model: 'sample-model-b', cluster_id: 'support', input_tokens: 30, output_tokens: 110, latency_ms: 2500, cost_usd: 0.001, finish_reason: 'end_turn', error: null, started_at: 'sample-data', prompt_redacted: 'Explain why an invoice total changed.', response_redacted: 'Sample support response placeholder.', hour: 5.2 },
-      { trace_id: 'sample-trace-006', provider: 'google', request_model: 'sample-model-c', cluster_id: 'coding', input_tokens: 46, output_tokens: 210, latency_ms: 3200, cost_usd: 0.002, finish_reason: 'end_turn', error: null, started_at: 'sample-data', prompt_redacted: 'Review a short SQL migration for safety.', response_redacted: 'Sample review response placeholder.', hour: 5.3 },
-    ],
-    providerDimension: [
-      { dim: 'groundedness', anthropic: 94, openai: 96, google: 96 },
-      { dim: 'relevance', anthropic: 88, openai: 96, google: 94 },
-      { dim: 'completeness', anthropic: 74, openai: 94, google: 92 },
-      { dim: 'safety', anthropic: 96, openai: 100, google: 98 },
-      { dim: 'instruction_following', anthropic: 78, openai: 94, google: 92 },
-    ],
-    truncation: { applied: false, resources: {} },
-  };
-})();
-
+// Empty until a store snapshot is returned. An unavailable API never becomes
+// illustrative evidence.
 const EMPTY = {
   meta: { totalTraces: 0, monitorEligibleCalls: 0, totalAgentRuns: 0, agentRunSources: [], agentRunSourcesTruncated: false, agentRunAgents: [], agentRunAgentsTruncated: false, lastAgentCaptureAt: null, totalJudged: 0, totalCost: null, providers: 0, clusters: 0, workload: null },
   evaluation: { status: "empty", selectedId: null, availableIdentities: [] },
-  providers: [], clusters: [], dimensionOverall: [], tsRows: [],
-  passrate: [], clusterPassrate: [], haikuDim: [], samples: [], providerDimension: [],
+  providers: [], dimensionOverall: [], samples: [], providerDimension: [],
   evaluatorHealth: [], scoreCoverage: {}, truncation: { applied: false, resources: {} },
 };
 
@@ -563,6 +383,11 @@ function monitorAlertCount(monitor) {
 }
 
 function navigateWorkflow(commitRoute, route, target) {
+  if (target?.tab === "explore" && target.section === "runs" && target.runId) {
+    return commitRoute({ ...route, tab: "explore", section: "runs", runIds: [target.runId],
+      selectedRunId: target.runId, eventId: target.eventId || null,
+      noticeId: target.noticeId || null });
+  }
   if (WORKSPACE_SECTIONS[target?.tab]?.some(([section]) => section === target.section)) {
     return commitRoute({ ...route, tab: target.tab, section: target.section });
   }
@@ -579,7 +404,7 @@ function navigateSetup(commitRoute, route, destination) {
   commitRoute({ ...route, tab: target[0], section: target[1] });
 }
 
-function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, loadedTraceFilter = { traceDate: null, traceJudgeStatus: "all", traceId: null }, reloading, loadError, operationsUrl = null, operationsPageUrl = null }) {
+function Dashboard({ data = EMPTY, onExit, source = "loading", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, loadedTraceFilter = { traceDate: null, traceJudgeStatus: "all", traceId: null }, reloading, loadError, operationsUrl = null, operationsPageUrl = null }) {
   const DATA = data;
   const initialSelection = useRef(parseDashboardSelection(
     typeof window === "undefined" ? "" : window.location.search,
@@ -598,8 +423,9 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     initialSelection.current.state === "invalid",
   );
   const tab = route.tab;
-  const commitRoute = React.useCallback((next, replace = false) => {
-    const normalized = parseDashboardRoute(serializeDashboardRoute(next), "overview");
+  const commitRoute = React.useCallback((next, replace = false, explicitReview = false) => {
+    const normalized = parseDashboardRoute(serializeDashboardRoute({ ...next,
+      followupReview: explicitReview && next.followupReview === true }), "overview");
     setRoute(normalized);
     setSelectionError(false);
     if (typeof window !== "undefined") {
@@ -611,17 +437,17 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
       );
     }
   }, []);
-  const setTab = React.useCallback((nextTab) => {
-    commitRoute({
-      ...route, tab: nextTab, findingCode: null, runIds: [],
-      selectedRunId: null, runIdsTruncated: false,
-    });
-  }, [commitRoute, route]);
+  const openFollowupReview = React.useCallback(({ runId, turnId }) => commitRoute({
+    ...route, tab: "explore", section: "runs", findingCode: null,
+    runIds: [runId], selectedRunId: runId, focusedTurnId: turnId,
+    followupReview: true, runIdsTruncated: false, eventId: null, noticeId: null,
+  }, false, true), [commitRoute, route]);
   const openFindingRun = React.useCallback((finding) => {
     const runIds = Array.isArray(finding?.runIds) ? finding.runIds : [];
     commitRoute({ ...route,
       tab: "explore", section: "runs", findingCode: finding?.code || null, runIds,
       selectedRunId: runIds[0] || null,
+      focusedTurnId: null,
       runIdsTruncated: finding?.runIdsTruncated === true,
     });
   }, [commitRoute, route]);
@@ -642,9 +468,11 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         setSelectionError(true);
         return;
       }
-      const canonical = canonicalDashboardHash(window.location.hash, fallback);
-      setRoute(parseDashboardRoute(canonical || window.location.hash, fallback));
-      if (canonical) window.history.replaceState({}, "", canonical);
+      const current = parseDashboardRoute(window.location.hash, fallback);
+      const canonical = canonicalDashboardHash(window.location.hash, fallback)
+        || (!current.explicit ? serializeDashboardRoute(parseDashboardRoute("", fallback)) : null);
+      setRoute(canonical ? parseDashboardRoute(canonical, fallback) : current);
+      if (canonical && canonical !== window.location.hash) window.history.replaceState({}, "", canonical);
     };
     restore();
     window.addEventListener("popstate", restore);
@@ -658,16 +486,6 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
       traceFilterCallback.current(route.traceJudgeStatus, route.traceId, route.traceDate || null);
     }
   }, [route.section, route.tab, route.traceId, route.traceJudgeStatus, route.traceDate, source]);
-  const initialRouteResolved = useRef(
-    source !== "loading" || initialRoute.current.explicit
-      || initialSelection.current.state === "valid",
-  );
-  useEffect(() => {
-    if (source === "live" && !initialRouteResolved.current) {
-      initialRouteResolved.current = true;
-      setTab(initialDashboardTab(DATA.meta));
-    }
-  }, [source, DATA.meta]);
   const evaluation = DATA.evaluation || { status: "empty", selectedId: null, availableIdentities: [] };
   const evaluatorRelevant = (tab === "evaluate" && route.section === "results")
     || (tab === "explore" && route.section === "calls");
@@ -695,21 +513,16 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     </div>
   );
   const syntheticStore = source === "live" && DATA.meta.dataProvenance === "synthetic";
-  const sourceLabel = syntheticStore ? "Synthetic demo" : source === "live" ? "Connected store" : source === "sample" ? "Synthetic sample" : source === "new" ? "No store yet" : loadError && !reloading ? "Evidence unavailable" : "Checking evidence";
-  const workloadLabel = syntheticStore ? "Synthetic local demo" : source === "sample"
-    ? "Sample workload"
-    : source === "loading" ? "Verdict workspace"
+  const sourceLabel = syntheticStore ? "Synthetic demo" : source === "live" ? "Connected store" : source === "new" ? "No store yet" : loadError && !reloading ? "Evidence unavailable" : "Checking evidence";
+  const workloadLabel = syntheticStore ? "Synthetic local demo" : source === "loading" ? "Verdict workspace"
     : source === "new" ? "New workspace"
     : DATA.meta.workload
       ? `Workload: ${DATA.meta.workload}`
       : "Verdict store";
   const primaryNav = [
     { tab: "overview", section: "summary", label: "Home", icon: Gauge },
-    { tab: "monitor", section: "plan", label: "Suggested setup", icon: Sparkles },
     { tab: "monitor", section: "status", label: "Monitoring", icon: Signal, badge: monitorAlertCount(DATA.monitor) },
     { tab: "explore", section: "runs", label: "Investigation", icon: Search },
-    { tab: "monitor", section: "segments", label: "Groups", icon: Layers },
-    { tab: "monitor", section: "history", label: "Model drift setup", icon: Activity },
   ];
   const secondaryNav = [
     { tab: "evaluate", section: "results", label: "Evaluate", icon: Scale },
@@ -721,7 +534,8 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     command_failed: "A captured command failed",
     tool_error: "A tool action reported an error",
     business_outcome_failed: "A reported outcome failed",
-    possible_tool_loop: "Repeated tool calls need review",
+    negative_feedback_recorded: "A thumbs-down rating was recorded",
+    possible_tool_loop: "Earlier repeated-call heuristic needs review",
   }[route.findingCode] || "Inspect the recorded finding";
   const focusedGap = isEvidenceGap({ code: route.findingCode });
   const pageIntro = {
@@ -741,15 +555,16 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     "monitor/history": ["Model drift setup", "Set up a model-call alert", "Review genuine provider calls, the reference cohort, and sample coverage before activation."],
   }[`${tab}/${route.section}`] || [tab === "report" ? "Report" : tab === "settings" ? "Settings" : tab === "explore" ? "Investigation" : tab === "overview" ? "Home" : tab === "monitor" ? "Monitoring" : "Evaluate", WORKSPACE_SECTIONS[tab]?.find(([section]) => section === route.section)?.[1] || "Verdict", null];
   const workspaceLabel = pageIntro[1];
-  const activeNav = (item) => tab === item.tab && (route.section === item.section
+  const activeNav = (item) => tab === item.tab && (route.section === item.section || item.tab === "monitor"
     || ["overview", "explore", "evaluate", "report", "settings"].includes(item.tab)
     || (item.tab === "monitor" && item.section === "plan" && route.section === "schedule"));
   const navigateSidebar = (item) => commitRoute({ ...route, tab: item.tab, section: item.section,
     findingCode: null, runIds: [], selectedRunId: null, runIdsTruncated: false,
     eventId: null, traceId: null, evaluatorId: null, sourceKind: null, agentName: null });
-  const openUsageRun = (runId, eventId = null, recentRevision = null, recentTurnId = null) =>
+  const openUsageRun = (runId, eventId = null, recentRevision = null, recentTurnId = null, focusedTurnId = null) =>
     commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null,
       runIds: [runId], selectedRunId: runId, runIdsTruncated: false,
+      focusedTurnId,
       eventId: recentRevision ? null : eventId,
       recentRevision: recentRevision || null, recentTurnId: recentTurnId || null,
       recentEventId: recentRevision ? eventId : null, noticeId: null });
@@ -769,7 +584,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         </nav>
       </aside>
       <div className="verdict-workspace-body">
-        <header className="verdict-workspace-topbar"><span>{workloadLabel} / Agent reliability</span><div className="verdict-topbar-actions">{(source === "sample" || syntheticStore) && <span className="verdict-synthetic-tag">ILLUSTRATIVE SYNTHETIC DATA</span>}<button onClick={() => onReload()} disabled={reloading} title="Refresh from API" aria-label="Refresh from API" className="verdict-refresh-button"><RefreshCw size={15} style={{ animation: reloading ? "vspin 0.8s linear infinite" : "none" }} /></button></div></header>
+        <header className="verdict-workspace-topbar"><span>{workloadLabel} / Agent reliability</span><div className="verdict-topbar-actions">{syntheticStore && <span className="verdict-synthetic-tag">ILLUSTRATIVE SYNTHETIC DATA</span>}<button onClick={() => onReload()} disabled={reloading} title="Refresh from API" aria-label="Refresh from API" className="verdict-refresh-button"><RefreshCw size={15} style={{ animation: reloading ? "vspin 0.8s linear infinite" : "none" }} /></button></div></header>
 
       <main className="verdict-workspace-content overflow-x-hidden">
         {tab === "explore" && route.section === "runs" && (route.selectedRunId || route.eventId) && <button type="button" className="verdict-back-link" onClick={() => commitRoute({ ...route, tab: "monitor", section: "status", findingCode: null, runIds: [], selectedRunId: null, eventId: null })}>View monitoring</button>}
@@ -846,18 +661,24 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
           onClearGroup={() => commitRoute({ ...route, sourceKind: null, agentName: null, selectedRunId: null, eventId: null })}
           evaluatorFingerprint={evaluation.selectedIdentity?.fingerprint || null}
           routedEventId={route.eventId || null}
+          routedTurnId={route.focusedTurnId || null}
+          routedFollowupReview={route.followupReview === true}
+          onClearTurnFocus={() => commitRoute({ ...route, focusedTurnId: null })}
+          onSelectEvent={(eventId) => commitRoute({ ...route,
+            focusedTurnId: null, eventId })}
           recentRevision={route.recentRevision || null}
           recentTurnId={route.recentTurnId || null}
           recentEventId={route.recentEventId || null}
           onOpenRecentEvent={({ runId, revision, turnId, eventId }) => commitRoute({
-            ...route, runIds: [runId], selectedRunId: runId, recentRevision: revision,
+            ...route, runIds: [runId], selectedRunId: runId, focusedTurnId: null, recentRevision: revision,
             recentTurnId: turnId, recentEventId: eventId,
           })}
           noticeId={route.noticeId || null}
-          onOpenNoticeEvidence={(runId, eventId, recentRevision, recentTurnId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, runIdsTruncated: false, eventId: recentRevision ? null : eventId, recentRevision: recentRevision || null, recentTurnId: recentTurnId || null, recentEventId: recentRevision ? eventId : null })}
+          onOpenNoticeEvidence={(runId, eventId, recentRevision, recentTurnId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, focusedTurnId: null, runIdsTruncated: false, eventId: recentRevision ? null : eventId, recentRevision: recentRevision || null, recentTurnId: recentTurnId || null, recentEventId: recentRevision ? eventId : null })}
           onSelectRun={(runId) => commitRoute({ ...route, selectedRunId: runId,
-            noticeId: null, recentRevision: null, recentTurnId: null, recentEventId: null })}
-          onOpenRelatedRun={(runId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, runIdsTruncated: false, eventId: null, noticeId: null })}
+            focusedTurnId: null, noticeId: null, recentRevision: null, recentTurnId: null, recentEventId: null })}
+          onOpenRelatedRun={(runId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, focusedTurnId: null, runIdsTruncated: false, eventId: null, noticeId: null })}
+          onOpenFollowup={openFollowupReview}
           onBrowseRecordedGroup={({ agentName, sourceKind }) => commitRoute({
             ...route, tab: "explore", section: "runs", findingCode: null,
             runIds: [], selectedRunId: null, runIdsTruncated: false, eventId: null,
@@ -881,7 +702,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             {loadError && !reloading ? "Could not load calls for the selected filter. The previous result is hidden." : "Loading calls for the selected filter…"}
           </p>{loadError && !reloading && <button type="button" className="mt-3 text-sm underline" style={{ color: C.accent }}
             onClick={() => onTraceFilterChange?.(route.traceJudgeStatus, route.traceId, route.traceDate || null)}>Retry loading calls</button>}</Panel>}
-        {tab === "explore" && route.section === "calls" && (source === "sample" || (source === "live" && traceFilterMatches)) && <Traces key={evaluation.selectedId || "none"} data={DATA} source={source}
+        {tab === "explore" && route.section === "calls" && source === "live" && traceFilterMatches && <Traces key={evaluation.selectedId || "none"} data={DATA} source={source}
           traceOffset={traceOffset} reloading={reloading} onTracePageChange={onTracePageChange}
           judgeStatus={route.traceJudgeStatus} selectedTraceId={route.traceId} traceDate={route.traceDate || null}
           onClearDate={() => commitRoute({ ...route, traceDate: null, traceId: null })}
@@ -900,10 +721,10 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "evaluate" && route.section === "inspect" && <InspectLab configUrl={mountedConfigUrl()} />}
         {tab === "evaluate" && route.section === "review" && <ControlCenter section="review" configUrl={mountedConfigUrl()} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}
         {tab === "monitor" && source === "loading" && <Panel className="p-5"><p role={loadError && !reloading ? "alert" : "status"} className="text-sm" style={{ color: loadError && !reloading ? C.amber : C.sub }}>{loadError && !reloading ? "Could not load this workspace's evidence. Monitoring and setup are unavailable until it loads." : "Checking captured evidence and monitoring setup…"}</p>{loadError && !reloading && <button type="button" className="mt-3 text-sm underline" style={{ color: C.accent }} onClick={() => onReload?.()}>Retry loading evidence</button>}</Panel>}
-        {tab === "monitor" && source !== "loading" && route.section === "status" && <IssueInbox configUrl={mountedConfigUrl()} insightsUrl={mountedInsightsUrl()} meta={DATA.meta} monitor={DATA.monitor} onRefreshStore={onReload} onOpenFinding={openFindingRun} onOpenPlan={() => commitRoute({ ...route, tab: "monitor", section: "plan", evaluatorId: null })} onOpenUsage={() => commitRoute({ ...route, tab: "overview", section: "summary", evaluatorId: null })} onOpenHistory={() => commitRoute({ ...route, tab: "monitor", section: "history", evaluatorId: null })} onOpenGroups={() => commitRoute({ ...route, tab: "monitor", section: "segments", evaluatorId: null })} onOpenDeliveries={() => commitRoute({ ...route, tab: "settings", section: "alerts", evaluatorId: null })} onOpenEvidence={(issue) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [issue.runId], selectedRunId: issue.runId, runIdsTruncated: false, eventId: issue.recentRevision ? null : issue.eventId, recentRevision: issue.recentRevision || null, recentTurnId: issue.recentTurnId || null, recentEventId: issue.recentRevision ? issue.eventId : null, noticeId: issue.noticeId || null, evaluatorId: null })} />}
+        {tab === "monitor" && source !== "loading" && route.section === "status" && <IssueInbox configUrl={mountedConfigUrl()} insightsUrl={mountedInsightsUrl()} meta={DATA.meta} monitor={DATA.monitor} onRefreshStore={onReload} onOpenFinding={openFindingRun} onOpenPlan={(notice) => commitRoute({ ...route, tab: "monitor", section: "plan", noticeId: notice?.noticeId || null, evaluatorId: null })} onOpenUsage={() => commitRoute({ ...route, tab: "overview", section: "summary", evaluatorId: null })} onOpenHistory={() => commitRoute({ ...route, tab: "monitor", section: "history", evaluatorId: null })} onOpenGroups={() => commitRoute({ ...route, tab: "monitor", section: "segments", evaluatorId: null })} onOpenDeliveries={() => commitRoute({ ...route, tab: "settings", section: "alerts", evaluatorId: null })} onOpenEvidence={(issue) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [issue.runId], selectedRunId: issue.runId, runIdsTruncated: false, eventId: issue.recentRevision ? null : issue.eventId, recentRevision: issue.recentRevision || null, recentTurnId: issue.recentTurnId || null, recentEventId: issue.recentRevision ? issue.eventId : null, noticeId: issue.noticeId || null, evaluatorId: null })} />}
         {tab === "monitor" && source !== "loading" && route.section === "history" && <Monitor view="history" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} traceCount={DATA.meta.monitorEligibleCalls || 0} totalTraces={DATA.meta.totalTraces} agentRunCount={DATA.meta.totalAgentRuns} onSetup={() => commitRoute({ ...route, tab: "settings", section: "sources" })} onPlan={() => commitRoute({ ...route, tab: "monitor", section: "plan" })} onGroups={() => commitRoute({ ...route, tab: "monitor", section: "segments" })} onChanged={onReload} onOpenTrace={(traceId, evaluatorId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId, evaluatorId })} />}
         {tab === "monitor" && source !== "loading" && route.section === "segments" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} configUrl={mountedConfigUrl()} traceCount={DATA.meta.monitorEligibleCalls || 0} sourceGroups={DATA.meta.agentRunSources || []} sourceGroupsTruncated={DATA.meta.agentRunSourcesTruncated} agentGroups={DATA.meta.agentRunAgents || []} agentGroupsTruncated={DATA.meta.agentRunAgentsTruncated} modelRows={DATA.managementReport?.models?.rows || []} modelRowsAvailable={DATA.managementReport?.models?.availableRows || 0} onSourceGroup={(sourceKind) => commitRoute({ ...route, tab: "explore", section: "runs", sourceKind, agentName: null, runIds: [], selectedRunId: null, eventId: null })} onAgentGroup={(agentName) => commitRoute({ ...route, tab: "explore", section: "runs", agentName, sourceKind: null, runIds: [], selectedRunId: null, eventId: null })} onRuns={() => commitRoute({ ...route, tab: "explore", section: "runs", sourceKind: null, agentName: null, runIds: [], selectedRunId: null, eventId: null })} onOpenRun={(runId) => commitRoute({ ...route, tab: "explore", section: "runs", sourceKind: null, agentName: null, runIds: [runId], selectedRunId: runId, eventId: null })} onPlan={() => commitRoute({ ...route, tab: "monitor", section: "plan" })} onMonitor={() => commitRoute({ ...route, tab: "monitor", section: "history" })} onSetup={() => commitRoute({ ...route, tab: "settings", section: "sources" })} />}
-        {tab === "monitor" && source !== "loading" && ["plan", "schedule"].includes(route.section) && <ControlCenter section="schedule" embedded={route.section === "plan"} configUrl={mountedConfigUrl()} meta={DATA.meta} monitor={DATA.monitor} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}
+        {tab === "monitor" && source !== "loading" && ["plan", "schedule"].includes(route.section) && <ControlCenter section="schedule" embedded={route.section === "plan"} configUrl={mountedConfigUrl()} meta={DATA.meta} monitor={DATA.monitor} managementReport={DATA.managementReport} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}
         {tab === "report" && route.section === "management" && <ManagementReport data={DATA} source={source} onPeriodChange={onReload} />}
         {tab === "settings" && route.section === "sources" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onRefresh={onReload} onNavigate={(destination) => navigateSetup(commitRoute, route, destination)} onComplete={() => { onReload(); commitRoute({ ...route, tab: "overview", section: "summary" }); }} />}
         {tab === "settings" && route.section === "alerts" && <ControlCenter section="alerts" configUrl={mountedConfigUrl()} />}
@@ -925,7 +746,7 @@ function GateCell({ label, value, color }) {
 }
 
 /* ---------------------------------------------------------------- TRACES */
-function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = false, onTracePageChange = null, judgeStatus = "all", selectedTraceId: routedTraceId = null, traceDate = null, onClearDate = null, onJudgeStatus = null, onSelectTrace = null, onEvaluateTrace = null }) {
+function Traces({ data = EMPTY, source = "loading", traceOffset = 0, reloading = false, onTracePageChange = null, judgeStatus = "all", selectedTraceId: routedTraceId = null, traceDate = null, onClearDate = null, onJudgeStatus = null, onSelectTrace = null, onEvaluateTrace = null }) {
   const DATA = data;
   const [prov, setProv] = useState("all");
   const [capture, setCapture] = useState("all");
@@ -965,7 +786,7 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
         <div className="flex items-center gap-2 mb-3 flex-wrap">
           <div className="flex items-center gap-2 px-3 py-1.5 border flex-1" style={{ borderColor: C.border, background: C.panel, minWidth: 180, borderRadius: 3 }}>
             <Search size={14} style={{ color: C.faint }} />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search prompt or trace ID…"
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter visible prompt previews or trace ID…"
               className="bg-transparent outline-none text-sm flex-1" style={{ color: C.text }} />
           </div>
           <div className="flex items-center gap-1 px-1 py-1 border" style={{ borderColor: C.border, background: C.panel, borderRadius: 3 }}>
@@ -1034,8 +855,8 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
         {source === "live" ? (
           <div className="text-xs mt-2 flex flex-wrap items-center gap-2" style={{ color: C.faint }}>
             <span className="flex-1">{traceDate
-              ? `Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${available.toLocaleString()} model calls on this UTC date. Judge and replay traffic are excluded. Date filters before paging; other filters apply to this page.`
-              : `Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains excluded. Filters apply to this page.`}</span>
+              ? `Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${available.toLocaleString()} model calls on this UTC date. Judge and replay traffic are excluded. Date filters before paging; other filters apply to this page. Deferred prompt content is not searched; open a trace to inspect it.`
+              : `Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains excluded. Filters apply to this page. Deferred prompt content is not searched; open a trace to inspect it.`}</span>
             <button onClick={() => onTracePageChange(Math.max(0, traceOffset - pageSize))}
               disabled={reloading || traceOffset === 0 || !onTracePageChange}
               className="px-2.5 py-1 border" style={{ borderColor: C.border, borderRadius: 3 }}>Previous</button>
@@ -1045,7 +866,7 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
           </div>
         ) : (
           <div className="text-xs mt-2" style={{ color: C.faint }}>
-            {`Showing newest ${shown.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains in store totals and is excluded here. Filters apply to this bounded view. ${rows.length.toLocaleString()} match the current filters.`}
+            {`Showing newest ${shown.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains in store totals and is excluded here. Filters apply to this bounded view. Deferred prompt content is not searched; open a trace to inspect it. ${rows.length.toLocaleString()} match the current filters.`}
           </div>
         )}
       </div>
@@ -1102,7 +923,7 @@ function TraceSpans({ traceId, root }) {
   </div>;
 }
 
-function TraceDetail({ s, onClose, onEvaluate = null, source = "sample" }) {
+function TraceDetail({ s, onClose, onEvaluate = null, source = "loading" }) {
   const provider = providerPresentation(s.provider, s.request_model);
   const recorded = traceTime(s);
   const hasContent = capturedContent(s);
@@ -1157,7 +978,9 @@ function TraceDetail({ s, onClose, onEvaluate = null, source = "sample" }) {
           <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 3 }}>
             {s.prompt_redacted == null ? (hasContent ? "Prompt was not captured for this trace." : "Not available for this historical metadata-only trace.") : (s.prompt_redacted || "Captured prompt was empty.")}
           </div>
-          {s.promptPreviewTruncated && <div className="text-xs mt-1" style={{ color: C.faint }}>Prompt preview shortened to keep this dashboard responsive.</div>}
+          {s.promptPreviewDeferred
+            ? <div className="text-xs mt-1" style={{ color: C.faint }}>Select this trace to inspect its redacted prompt preview.</div>
+            : s.promptPreviewTruncated && <div className="text-xs mt-1" style={{ color: C.faint }}>Prompt preview shortened to keep this dashboard responsive.</div>}
         </div>
         <div>
           <div className="text-xs mb-1" style={{ color: C.faint }}>RESPONSE</div>
@@ -1170,7 +993,9 @@ function TraceDetail({ s, onClose, onEvaluate = null, source = "sample" }) {
             <div className="text-sm p-2.5" style={{ background: C.redBg, color: C.red, border: `1px solid ${C.red}`, borderRadius: 3 }}>
               Provider failure: {s.error}
             </div>
-            {s.errorPreviewTruncated && <div className="text-xs mt-1" style={{ color: C.faint }}>Provider error preview shortened to keep this dashboard responsive.</div>}
+            {s.errorPreviewDeferred
+              ? <div className="text-xs mt-1" style={{ color: C.faint }}>Select this trace to inspect its redacted provider error preview.</div>
+              : s.errorPreviewTruncated && <div className="text-xs mt-1" style={{ color: C.faint }}>Provider error preview shortened to keep this dashboard responsive.</div>}
           </div>
         )}
         <div className="p-3" style={{ background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 3 }}>
@@ -1191,7 +1016,9 @@ function TraceDetail({ s, onClose, onEvaluate = null, source = "sample" }) {
             <TraceFact label="Tokens" value={`${s.input_tokens ?? "—"} in / ${s.output_tokens ?? "—"} out`} />
             <TraceFact label="Latency" value={s.latency_ms == null ? "Unavailable" : `${s.latency_ms} ms`} />
             <TraceFact label="Supplied cost" value={s.cost_usd == null ? "Unavailable" : usd(s.cost_usd)} />
-          </div> : <div className="text-xs mt-3" style={{ color: C.amber }}>Deterministic facts were not included by this Verdict server. Refresh after upgrading the server.</div>}
+          </div> : <div className="text-xs mt-3" style={{ color: C.amber }}>{s.deterministicFactsDeferred
+            ? "Loading full trace facts for the selected call."
+            : "Deterministic facts were not included by this Verdict server. Refresh after upgrading the server."}</div>}
         </div>
         {s.judgment && (
           <div>
@@ -1240,7 +1067,7 @@ function TraceFact({ label, value }) {
 }
 
 /* ----------------------------------------------------------------- JUDGE */
-function Judge({ data = SEED, onOpenOperations = null }) {
+function Judge({ data = EMPTY, onOpenOperations = null }) {
   const DATA = data;
   const providerKeys = DATA.providers.map((provider) => provider.key);
   const providerPresentations = Object.fromEntries(DATA.providers.map((provider) => [
@@ -1397,7 +1224,7 @@ function Judge({ data = SEED, onOpenOperations = null }) {
 }
 
 /* --------------------------------------------------------------- COMPARE */
-function Compare({ data = SEED, source = "sample" }) {
+function Compare({ data = EMPTY, source = "loading" }) {
   const DATA = data;
   const codexRuns = (DATA.meta.agentRunSources || []).find((item) => item.sourceKind === "codex")?.runs || 0;
   const provs = DATA.providers.map((provider) => ({
@@ -1414,9 +1241,7 @@ function Compare({ data = SEED, source = "sample" }) {
   return (
     <div className="space-y-5">
       <div className="text-sm" style={{ color: C.sub }}>
-        {source === "sample"
-          ? "Bundled synthetic sample: the same prompt set is shown across three providers to demonstrate comparison views. Connect live data before drawing provider conclusions."
-          : "Unmatched traffic · descriptive only. These provider/model rows summarize the calls each provider actually received; they are not a controlled head-to-head comparison."}
+        Unmatched traffic · descriptive only. These provider/model rows summarize the calls each provider actually received; they are not a controlled head-to-head comparison.
       </div>
       {source === "live" && codexRuns > 0 && <Panel className="p-4"><div className="text-sm" style={{ color: C.sub }}><span style={{ color: C.text }}>{codexRuns.toLocaleString()} Codex agent runs were captured.</span> When Codex completion diagnostics are available, their metadata-only model calls appear below with token usage where a matching session event exists, but without prompt, response, latency, or cost data. Agent-run and model-call counts can differ.</div></Panel>}
 
@@ -1448,10 +1273,10 @@ function Compare({ data = SEED, source = "sample" }) {
       <Panel className="p-5">
         <div className="font-semibold text-sm mb-2 flex items-center gap-2"><BarChart3 size={16} style={{ color: C.accent2 }} /> How to read this view</div>
         <ul className="space-y-2 text-sm" style={{ color: C.sub }}>
-          <li className="flex gap-2"><span style={{ color: C.amber }}>•</span> <span><span style={{ color: C.text }}>{source === "sample" ? "Compare cost and latency on identical traffic" : "Use these rows to find operational differences"}</span>{source === "sample" ? " before changing providers or prompts." : "; use a matched replay before attributing a difference to the provider."}</span></li>
+          <li className="flex gap-2"><span style={{ color: C.amber }}>•</span> <span><span style={{ color: C.text }}>Use these rows to find operational differences</span>; use a matched replay before attributing a difference to the provider.</span></li>
           <li className="flex gap-2"><span style={{ color: C.amber }}>•</span> <span><span style={{ color: C.text }}>Check error rate and output tokens</span> alongside quality signals; drift is rarely one-dimensional.</span></li>
           <li className="flex gap-2"><span style={{ color: C.green }}>•</span> <span><span style={{ color: C.text }}>Use per-cluster views</span> to avoid averaging unlike workloads together.</span></li>
-          <li className="flex gap-2"><span style={{ color: C.blue }}>•</span> <span>{source === "sample" ? <><span style={{ color: C.text }}>Treat bundled numbers as sample data</span>; your own traces are the only meaningful provider comparison.</> : <><span style={{ color: C.text }}>Do not treat unmatched traffic as a head-to-head benchmark</span>; compare matched workloads or controlled replays.</>}</span></li>
+          <li className="flex gap-2"><span style={{ color: C.blue }}>•</span> <span><span style={{ color: C.text }}>Do not treat unmatched traffic as a head-to-head benchmark</span>; compare matched workloads or controlled replays.</span></li>
         </ul>
       </Panel>
     </div>

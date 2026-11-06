@@ -6,7 +6,9 @@ import pytest
 from verdict.conversation_assessments import validate_assessment, validate_rubric
 from verdict.conversations import validate_conversation
 from verdict.dashboard.app import create_app
+from verdict.pricing import compute_cost_usd
 from verdict.storage.sqlite import SQLiteStorage
+from verdict_eval.providers import FakeProvider, output_token_ceiling
 
 
 @pytest.mark.asyncio
@@ -80,6 +82,82 @@ async def test_conversation_preview_and_review_show_partial_coverage(tmp_path):
         detail = await client.get(f"/api/data/conversations/{row['id']}")
         assert detail.status_code == 200
         assert len(detail.json()["conversation"]["messages"]) == 4
+
+
+@pytest.mark.asyncio
+async def test_conversation_route_requires_static_spend_limit_before_provider_egress(tmp_path, monkeypatch):
+    path = tmp_path / "spend.db"
+    store = SQLiteStorage(str(path))
+    store.save_conversation(validate_conversation({
+        "id": "f" * 32, "tenant_id": "alpha", "source_scope": "b" * 16,
+        "messages": [{"role": "user", "content": "Synthetic question."},
+                     {"role": "assistant", "content": "Synthetic answer."}],
+        "event_at": "2026-09-01T12:00:00Z", "end_status": "complete", "input_issues": [],
+    }))
+    store.close()
+    calls = []
+    provider = FakeProvider(lambda request: calls.append(request) or
+        '{"dimensions":{"helpful":{"verdict":"PASS","reason":"Synthetic answer.","findings":[]}}}')
+    provider.name = "openai"
+    monkeypatch.setattr("verdict_eval.providers.OpenAIAdapter", lambda: provider)
+    app = create_app(storage=f"sqlite:///{path}", tenant_id="alpha")
+    config = {"unit": "conversation", "provider": "openai", "model": "gpt-4.1-mini",
+              "maxCalls": 1, "rubric": {"name": "quality", "version": "1", "target": "conversation",
+                                      "dimensions": [{"name": "helpful", "description": "Answers."}]}}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        token = (await client.get("/api/setup/token")).json()["setupToken"]
+        headers = {"X-Verdict-Setup": token}
+        response = await client.post("/api/evaluators/preview", json=config, headers=headers)
+        assert response.status_code == 200
+        preview = response.json()
+        assert preview["plannedCalls"] == 1
+        approved = {**config, "plannedTargets": preview["plannedTargets"],
+                    "planFingerprint": preview["planFingerprint"], "confirmExternalEgress": True}
+        missing = await client.post("/api/evaluators/run", json=approved, headers=headers)
+        assert missing.status_code == 400
+        assert calls == []
+        bound = preview["upperStaticListPriceUsd"]
+        too_low = await client.post("/api/evaluators/run",
+                                    json={**approved, "maxEstimatedUsd": bound / 2}, headers=headers)
+        assert too_low.status_code == 400
+        assert calls == []
+        unknown_config = {**config, "model": "synthetic-unpriced-model"}
+        unknown_preview = (await client.post("/api/evaluators/preview",
+                                             json=unknown_config, headers=headers)).json()
+        assert unknown_preview["upperStaticListPriceUsd"] is None
+        unknown_run = await client.post("/api/evaluators/run", json={
+            **unknown_config, "plannedTargets": unknown_preview["plannedTargets"],
+            "planFingerprint": unknown_preview["planFingerprint"],
+            "maxEstimatedUsd": 1, "confirmExternalEgress": True}, headers=headers)
+        assert unknown_run.status_code == 400
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://synthetic-judge.invalid/v1")
+        custom_preview = (await client.post("/api/evaluators/preview",
+                                            json=config, headers=headers)).json()
+        assert custom_preview["upperStaticListPriceUsd"] is None
+        custom_run = await client.post("/api/evaluators/run", json={
+            **approved, "planFingerprint": custom_preview["planFingerprint"],
+            "maxEstimatedUsd": 1}, headers=headers)
+        assert custom_run.status_code == 400
+        assert calls == []
+        monkeypatch.delenv("OPENAI_BASE_URL")
+        derivative_config = {**config, "model": "custom-gpt-4o-mini-private"}
+        derivative_preview = (await client.post("/api/evaluators/preview",
+                                                json=derivative_config, headers=headers)).json()
+        assert derivative_preview["upperStaticListPriceUsd"] is None
+        derivative_run = await client.post("/api/evaluators/run", json={
+            **derivative_config, "plannedTargets": derivative_preview["plannedTargets"],
+            "planFingerprint": derivative_preview["planFingerprint"],
+            "maxEstimatedUsd": 100, "confirmExternalEgress": True}, headers=headers)
+        assert derivative_run.status_code == 400
+        assert calls == []
+        exact = await client.post("/api/evaluators/run",
+                                  json={**approved, "maxEstimatedUsd": bound}, headers=headers)
+        assert exact.status_code == 200
+        assert len(calls) == 1
+        input_bound = sum(len(message["content"].encode("utf-8"))
+                          for message in calls[0].messages) + 1_024
+        assert bound == compute_cost_usd(config["model"], input_bound,
+                                         output_token_ceiling(4096, config["model"]))
 
 
 @pytest.mark.asyncio

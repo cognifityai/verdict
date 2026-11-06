@@ -131,6 +131,14 @@ test("report presents one consistent application-only executive summary", () => 
   assert.equal(report.quality.legacyChange, undefined);
 });
 
+test("report identifies a live store with explicit synthetic provenance", () => {
+  const input = bundle();
+  input.meta = { dataProvenance: "synthetic" };
+  const report = buildManagementReport(input, { source: "live" });
+  assert.equal(report.source, "Synthetic Verdict store");
+  assert.match(managementReportHtml(report), /Synthetic Verdict store/);
+});
+
 test("published v1 report never reuses its inferred success as a completion claim", () => {
   const input = bundle();
   input.managementReport.schema = "management-report-v1";
@@ -262,7 +270,8 @@ test("empty and malformed report evidence remains unavailable instead of zero", 
     "No data", "Unavailable", "Unavailable", "Unavailable",
   ]);
   assert.deepEqual(empty.timeline.rows, []);
-  assert.deepEqual(empty.attention, ["No application telemetry is available yet."]);
+  assert.match(empty.range, /No application model calls captured/);
+  assert.deepEqual(empty.attention, ["No application model calls are available to this report yet; captured Agent Runs appear in Investigation."]);
 
   const observedEmpty = buildManagementReport({ managementReport: {
     schema: "management-report-v1",
@@ -282,6 +291,8 @@ test("empty and malformed report evidence remains unavailable instead of zero", 
   assert.deepEqual(observedEmpty.kpis.map((item) => item.value), [
     "0", "0", "0", "Unavailable",
   ]);
+  assert.deepEqual(observedEmpty.attention, ["No application model calls are available to this report yet; captured Agent Runs appear in Investigation."]);
+  assert.match(observedEmpty.range, /No application model calls captured/);
 
   const malformed = bundle();
   malformed.managementReport.scope.calls = -7;

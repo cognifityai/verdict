@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
+from threading import Event
 
 import pytest
 import verdict.evidence as evidence_contract
@@ -19,9 +22,12 @@ from verdict.dashboard.app import (
     build_agent_run_detail,
     build_agent_runs_bundle,
     build_agent_turn_analysis,
+    build_followup_review,
     create_app,
 )
+from verdict.dashboard.control_plane import ControlStore
 from verdict.evidence import AgentEvent
+from verdict.local_recent_facts import trace_evidence_fingerprint
 from verdict.schema import JudgmentStatus
 from verdict.storage import BufferedStorage, InMemoryStorage, SQLiteStorage
 from verdict.telemetry.cli import main
@@ -667,6 +673,571 @@ def _claude_records() -> list[dict[str, object]]:
     ]
 
 
+@pytest.mark.parametrize("notification_metadata", [
+    {"origin": {"kind": "task-notification"}, "promptSource": "system"},
+    {"origin": {"kind": "agent"}, "turnOrigin": "task_notification"},
+    {"origin": {"kind": "future-automated"}},
+    {"origin": {"kind": "human"}, "promptSource": "system"},
+    {"turnOrigin": "task_notification"},
+    {"turnOrigin": {"kind": "task_notification"}},
+])
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_claude_nonhuman_user_rows_do_not_become_followup_candidates(
+    tmp_path: Path, notification_metadata: dict[str, object], backend: str,
+) -> None:
+    root = tmp_path / "claude"
+    records = _claude_records()
+    records[0]["origin"] = {"kind": "human"}
+    records.insert(0, {
+        "timestamp": "2026-08-30T10:59:59Z", "type": "user",
+        "uuid": "before-first-human", "sessionId": "claude-session-1",
+        "origin": {"kind": "task-notification"},
+        "message": {"content": "Synthetic automated prelude"},
+    })
+    records.extend([
+        {
+            "timestamp": "2026-08-30T11:00:04Z", "type": "user",
+            "uuid": "automatic-notice", "sessionId": "claude-session-1",
+            "message": {"content": "Synthetic background task completed"},
+            **notification_metadata,
+        },
+        {
+            "timestamp": "2026-08-30T11:00:05Z", "type": "user",
+            "uuid": "human-followup", "sessionId": "claude-session-1",
+            "origin": {"kind": "human"},
+            "message": {"content": "Please add the missing summary"},
+        },
+        {
+            "timestamp": "2026-08-30T11:00:06Z", "type": "assistant",
+            "uuid": "assistant-followup", "sessionId": "claude-session-1",
+            "message": {
+                "id": "msg-followup", "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Summary added."}],
+            },
+        },
+    ])
+    _write_jsonl(root / "session.jsonl", records)
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage import PostgresStorage
+
+            dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                            allow_any_database=False)
+            if dsn is None:
+                pytest.skip(reason)
+            storage_url = stack.enter_context(isolated_test_dsn(dsn))
+            new_storage = PostgresStorage
+            dashboard_storage = storage_url
+        else:
+            storage_url = str(tmp_path / "verdict.db")
+            new_storage = SQLiteStorage
+            dashboard_storage = f"sqlite:///{storage_url}"
+        storage = new_storage(storage_url)
+        try:
+            assert capture_local_agents(storage, tenant_id="local", claude_root=root).stored == 1
+            assert capture_local_agents(storage, tenant_id="local", claude_root=root).stored == 1
+            [bundle] = storage.list_agent_run_bundles("local")
+            assert [turn.user_request_redacted for turn in bundle.turns] == [
+                None, "diagnose build", None, "Please add the missing summary",
+            ]
+            assert bundle.turns[1].final_response_redacted == "The build passes."
+        finally:
+            storage.close()
+        candidates = build_agent_runs_bundle(
+            storage_url, tenant="local", view="followups",
+        )
+        assert candidates["followups"] == []
+        response = TestClient(
+            create_app(storage=dashboard_storage, tenant_id="local")
+        ).get("/api/runs?view=followups&limit=10")
+        assert response.status_code == 200
+        assert response.json()["followups"] == candidates["followups"]
+
+
+def test_claude_background_assistant_stays_out_of_prior_human_answer(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "claude"
+    records = _claude_records()
+    records.extend([
+        {
+            "timestamp": "2026-08-30T11:00:04Z", "type": "user",
+            "uuid": "automatic-notice", "sessionId": "claude-session-1",
+            "origin": {"kind": "task-notification"}, "promptSource": "system",
+            "message": {"content": "Synthetic task completed"},
+        },
+        {
+            "timestamp": "2026-08-30T11:00:05Z", "type": "assistant",
+            "uuid": "background-answer", "sessionId": "claude-session-1",
+            "message": {
+                "id": "msg-background", "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Synthetic automated reply"}],
+            },
+        },
+        {
+            "timestamp": "2026-08-30T11:00:06Z", "type": "user",
+            "uuid": "human-followup", "sessionId": "claude-session-1",
+            "origin": {"kind": "human"},
+            "message": {"content": "Please add a summary"},
+        },
+        {
+            "timestamp": "2026-08-30T11:00:07Z", "type": "assistant",
+            "uuid": "followup-answer", "sessionId": "claude-session-1",
+            "message": {
+                "id": "msg-followup", "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Summary added."}],
+            },
+        },
+    ])
+    _write_jsonl(root / "session.jsonl", records)
+    database = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(database))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", claude_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        assert [turn.user_request_redacted for turn in bundle.turns] == [
+            "diagnose build", None, "Please add a summary",
+        ]
+        assert [turn.final_response_redacted for turn in bundle.turns] == [
+            "The build passes.", "Synthetic automated reply", "Summary added.",
+        ]
+        model_events = [event for event in bundle.events
+                        if event.event_type is AgentEventType.MODEL_CALL]
+        assert sorted(event.turn_id for event in model_events) == sorted([
+            bundle.turns[0].turn_id, bundle.turns[0].turn_id,
+            bundle.turns[1].turn_id, bundle.turns[2].turn_id,
+        ])
+    finally:
+        storage.close()
+    assert build_agent_runs_bundle(database, tenant="local", view="followups")[
+        "followups"
+    ] == []
+
+
+@pytest.mark.parametrize("missing_field", ["uuid", "timestamp"])
+def test_claude_automatic_boundary_missing_identity_fails_source_visibly(
+    tmp_path: Path, missing_field: str,
+) -> None:
+    root = tmp_path / "claude"
+    records = _claude_records()
+    notice = {
+        "timestamp": "2026-08-30T11:00:04Z", "type": "user",
+        "uuid": "automatic-notice", "sessionId": "claude-session-1",
+        "origin": {"kind": "task-notification"},
+        "message": {"content": "Synthetic task completed"},
+    }
+    del notice[missing_field]
+    records.append(notice)
+    _write_jsonl(root / "invalid.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        result = capture_local_agents(storage, tenant_id="local", claude_root=root)
+        assert result.stored == 0
+        assert result.skip_reasons == {"invalid_claude_turn_identity": 1}
+        assert storage.list_agent_run_bundles("local") == []
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+@pytest.mark.parametrize("clustered,omit_reprojected_trace,source_change,fail_write", [
+    (False, False, "same", False), (True, False, "same", False),
+    ("inactive_assignment", False, "same", False),
+    (False, True, "same", False), (False, False, "same", True),
+    (False, False, "append", False),
+    (False, False, "compatible_rewrite", False),
+])
+def test_claude_reimport_reclassifies_previous_automatic_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+    clustered: bool, omit_reprojected_trace: bool, source_change: str,
+    fail_write: bool,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+    from verdict.schema import Judgment
+
+    root = tmp_path / "claude"
+    records = _claude_records()
+    records.extend([
+        {
+            "timestamp": "2026-08-30T11:00:04Z", "type": "user",
+            "uuid": "automatic-notice", "sessionId": "claude-session-1",
+            "origin": {"kind": "task-notification"},
+            "message": {"content": "Synthetic background task completed"},
+        },
+        {
+            "timestamp": "2026-08-30T11:00:05Z", "type": "assistant",
+            "uuid": "background-answer", "sessionId": "claude-session-1",
+            "message": {
+                "id": "msg-background", "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Synthetic automated reply"}],
+            },
+        },
+    ])
+    _write_jsonl(root / "session.jsonl", records)
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage import PostgresStorage
+
+            dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                            allow_any_database=False)
+            if dsn is None:
+                pytest.skip(reason)
+            storage_url = stack.enter_context(isolated_test_dsn(dsn))
+            new_storage = PostgresStorage
+        else:
+            storage_url = str(tmp_path / "verdict.db")
+            new_storage = SQLiteStorage
+        storage = new_storage(storage_url)
+        try:
+            parser = local_agents._parse_claude
+
+            def old_parser(path: Path, *, home: Path | None):
+                parsed = parser(path, home=home)
+                parsed.turns[-1].request = "Synthetic background task completed"
+                parsed.turns[-1].legacy_request = parsed.turns[-1].request
+                parsed.turns[-1].automatic = False
+                return parsed
+
+            with monkeypatch.context() as patch:
+                patch.setattr(local_agents, "_parse_claude", old_parser)
+                assert capture_local_agents(
+                    storage, tenant_id="local", claude_root=root,
+                ).stored == 1
+            [before] = storage.list_agent_run_bundles("local")
+            assert before.turns[-1].user_request_redacted is not None
+            notice_trace_ids = {
+                event.trace_id for event in before.events
+                if event.turn_id == before.turns[-1].turn_id
+                and event.trace_id is not None
+            }
+            assert len(notice_trace_ids) == 1
+            [notice_trace_id] = notice_trace_ids
+            old_trace = storage.get_trace(notice_trace_id)
+            assert old_trace is not None and old_trace.prompt_redacted is not None
+            if clustered == "inactive_assignment":
+                from verdict.schema import ClusterRegistryVersion, TraceClusterAssignment
+
+                storage.insert_cluster_preview(
+                    ClusterRegistryVersion(
+                        tenant_id="local", version_id="inactive-local-test",
+                        strategy="explicit", created_by="test",
+                    ), [], [], [TraceClusterAssignment(
+                        "local", "inactive-local-test", notice_trace_id,
+                        "fit", "ineligible", reason="content_not_captured",
+                    )],
+                )
+            old_judgment = Judgment(
+                trace_id=notice_trace_id, evaluator_fingerprint="a" * 64,
+                evaluated_trace_fingerprint=trace_evidence_fingerprint(old_trace),
+            )
+            storage.insert_judgment(old_judgment)
+            assert storage.list_judgments_for_trace(notice_trace_id)
+            saved_review_id = None
+            if (source_change == "same" and not clustered
+                    and not omit_reprojected_trace and not fail_write):
+                review = build_followup_review(
+                    storage_url, tenant="local", run_id=before.run.run_id,
+                    turn_id=before.turns[-1].turn_id,
+                )
+                saved_review_id = review["documentId"]
+                ControlStore(storage_url).append(
+                    "local", kind="review", document_id=saved_review_id,
+                    state="resolved", expected_revision=None,
+                    payload={
+                        "reviewType": "followup_correction_v1",
+                        "runId": before.run.run_id,
+                        "turnId": before.turns[-1].turn_id,
+                        "priorTurnId": review["priorTurnId"],
+                        "evidenceFingerprint": review["evidenceFingerprint"],
+                        "label": "unclear",
+                    },
+                )
+            if source_change == "append":
+                records.append({
+                    "timestamp": "2026-08-30T11:00:06Z", "type": "user",
+                    "uuid": "later-human", "sessionId": "claude-session-1",
+                    "origin": {"kind": "human"},
+                    "message": {"content": "Synthetic later human request"},
+                })
+                _write_jsonl(root / "session.jsonl", records)
+            elif source_change == "compatible_rewrite":
+                (root / "session.jsonl").write_text("".join(
+                    json.dumps(record, separators=(",  ", ":  ")) + "\n"
+                    for record in records
+                ))
+            if clustered is True:
+                storage.insert_trace(replace(old_trace, cluster_id="synthetic-cluster"))
+            if fail_write:
+                method = (
+                    "_write_normalized_bundle_cursor" if backend == "postgres"
+                    else "_write_normalized_bundle"
+                )
+
+                def reject_bundle(*args, **kwargs):
+                    raise ValueError("local_source_conflict")
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(storage, method, reject_bundle)
+                    result = capture_local_agents(
+                        storage, tenant_id="local", claude_root=root,
+                    )
+                assert result.stored == 0
+                assert result.skip_reasons == {"local_source_conflict": 1}
+                [unchanged] = storage.list_agent_run_bundles("local")
+                assert unchanged.turns[-1].user_request_redacted == (
+                    before.turns[-1].user_request_redacted
+                )
+                assert storage.get_trace(notice_trace_id).prompt_redacted == (
+                    old_trace.prompt_redacted
+                )
+                return
+            if omit_reprojected_trace:
+                linked_traces = local_agents._linked_traces
+
+                def missing_trace(*args, **kwargs):
+                    return [
+                        trace for trace in linked_traces(*args, **kwargs)
+                        if trace.prompt_redacted is not None
+                    ]
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(local_agents, "_linked_traces", missing_trace)
+                    result = capture_local_agents(
+                        storage, tenant_id="local", claude_root=root,
+                    )
+            else:
+                result = capture_local_agents(
+                    storage, tenant_id="local", claude_root=root,
+                )
+            if omit_reprojected_trace:
+                assert result.stored == 0
+                assert result.skip_reasons == {"local_source_reprojection_required": 1}
+                assert storage.get_trace(notice_trace_id).prompt_redacted == (
+                    old_trace.prompt_redacted
+                )
+                return
+            if clustered:
+                assert result.stored == 0
+                assert result.skip_reasons == {"local_source_registry_conflict": 1}
+                assert storage.get_trace(notice_trace_id).prompt_redacted == (
+                    old_trace.prompt_redacted
+                )
+                return
+            assert result.stored == 1
+            [after] = storage.list_agent_run_bundles("local")
+            assert [turn.turn_id for turn in after.turns[:len(before.turns)]] == [
+                turn.turn_id for turn in before.turns
+            ]
+            assert after.turns[1].user_request_redacted is None
+            assert after.turns[1].request_state is EvidenceState.MISSING
+            assert after.turns[1].final_response_redacted == "Synthetic automated reply"
+            if source_change == "append":
+                assert after.turns[-1].user_request_redacted == (
+                    "Synthetic later human request"
+                )
+            new_trace = storage.get_trace(notice_trace_id)
+            assert new_trace is not None
+            assert new_trace.prompt_redacted is None
+            assert not any(
+                message.get("role") == "user"
+                for message in (new_trace.raw_messages or [])
+            )
+            assert storage.list_judgments_for_trace(notice_trace_id) == []
+            late_result = Judgment(
+                trace_id=notice_trace_id, evaluator_fingerprint="b" * 64,
+                evaluated_trace_fingerprint=trace_evidence_fingerprint(old_trace),
+            )
+            storage.insert_judgment(late_result)
+            assert storage.list_judgments_for_trace(notice_trace_id) == []
+            storage.insert_judgment(Judgment(
+                trace_id=notice_trace_id, status=JudgmentStatus.ERROR,
+                evaluator_fingerprint="c" * 64,
+                evaluated_trace_fingerprint=trace_evidence_fingerprint(old_trace),
+            ))
+            storage.insert_judgment(Judgment(
+                trace_id=notice_trace_id, evaluator_fingerprint="d" * 64,
+            ))
+            assert storage.list_judgments_for_trace(notice_trace_id) == []
+            if source_change == "same":
+                from verdict.schema import ClusterRegistryVersion, TraceClusterAssignment
+
+                with pytest.raises(ValueError, match="local_source_registry_conflict"):
+                    storage.insert_cluster_preview(
+                        ClusterRegistryVersion(
+                            tenant_id="local", version_id="late-local-test",
+                            strategy="explicit", created_by="test",
+                        ), [], [], [TraceClusterAssignment(
+                            "local", "late-local-test", notice_trace_id,
+                            "fit", "ineligible", reason="content_not_captured",
+                        )],
+                    )
+            if saved_review_id is not None:
+                assert len(ControlStore(storage_url).history(
+                    "local", "review", saved_review_id,
+                )) == 1
+                with pytest.raises(ValueError, match="complete adjacent text unavailable"):
+                    build_followup_review(
+                        storage_url, tenant="local", run_id=before.run.run_id,
+                        turn_id=before.turns[-1].turn_id,
+                    )
+        finally:
+            storage.close()
+
+
+def test_postgres_automatic_reimport_serializes_with_registry_assignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+    from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+    from verdict.schema import ClusterRegistryVersion, TraceClusterAssignment
+    from verdict.storage import PostgresStorage
+
+    dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                    allow_any_database=False)
+    if dsn is None:
+        pytest.skip(reason)
+    root = tmp_path / "claude"
+    rows = _claude_records()
+    rows.extend([
+        {"timestamp": "2026-08-30T11:00:04Z", "type": "user",
+         "uuid": "automatic-notice", "sessionId": "claude-session-1",
+         "origin": {"kind": "task-notification"},
+         "message": {"content": "Synthetic task completed"}},
+        {"timestamp": "2026-08-30T11:00:05Z", "type": "assistant",
+         "uuid": "background-answer", "sessionId": "claude-session-1",
+         "message": {"id": "background-msg", "model": "claude-sonnet-4-5",
+                     "stop_reason": "end_turn",
+                     "content": [{"type": "text", "text": "Synthetic reply"}]}},
+    ])
+    _write_jsonl(root / "session.jsonl", rows)
+    with isolated_test_dsn(dsn) as storage_url:
+        registry = PostgresStorage(storage_url)
+        capture = PostgresStorage(storage_url)
+        release = Event()
+        entered = Event()
+        try:
+            parser = local_agents._parse_claude
+
+            def old_parser(path: Path, *, home: Path | None):
+                parsed = parser(path, home=home)
+                parsed.turns[-1].request = "Synthetic task completed"
+                parsed.turns[-1].legacy_request = parsed.turns[-1].request
+                parsed.turns[-1].automatic = False
+                return parsed
+
+            with monkeypatch.context() as patch:
+                patch.setattr(local_agents, "_parse_claude", old_parser)
+                assert capture_local_agents(capture, tenant_id="local", claude_root=root).stored == 1
+            [bundle] = capture.list_agent_run_bundles("local")
+            trace_id = next(event.trace_id for event in bundle.events
+                            if event.turn_id == bundle.turns[-1].turn_id
+                            and event.trace_id is not None)
+            original_insert = registry._insert_cluster_assignments_cursor
+
+            def paused_insert(*args, **kwargs):
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("registry test did not release")
+                return original_insert(*args, **kwargs)
+
+            with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=2) as pool:
+                patch.setattr(registry, "_insert_cluster_assignments_cursor", paused_insert)
+                preview = pool.submit(
+                    registry.insert_cluster_preview,
+                    ClusterRegistryVersion(tenant_id="local", version_id="race-local-test",
+                                           strategy="explicit", created_by="test"),
+                    [], [], [TraceClusterAssignment(
+                        "local", "race-local-test", trace_id,
+                        "fit", "ineligible", reason="content_not_captured",
+                    )],
+                )
+                assert entered.wait(5)
+                try:
+                    recapture = pool.submit(
+                        capture_local_agents, capture, tenant_id="local", claude_root=root,
+                    )
+                    with pytest.raises(FutureTimeout):
+                        recapture.result(timeout=0.2)
+                finally:
+                    release.set()
+                preview.result(timeout=5)
+                result = recapture.result(timeout=5)
+            assert result.stored == 0
+            assert result.skip_reasons == {"local_source_registry_conflict": 1}
+            assert capture.get_trace(trace_id).prompt_redacted is not None
+        finally:
+            release.set()
+            registry.close()
+            capture.close()
+
+
+@pytest.mark.parametrize("buffered", [False, True])
+@pytest.mark.parametrize("capture_content", [False, True])
+def test_memory_claude_reimport_reclassifies_automatic_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    buffered: bool, capture_content: bool,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "claude"
+    records = _claude_records()
+    records.extend([
+        {
+            "timestamp": "2026-08-30T11:00:04Z", "type": "user",
+            "uuid": "automatic-notice", "sessionId": "claude-session-1",
+            "origin": {"kind": "task-notification"},
+            "message": {"content": "Synthetic background task completed"},
+        },
+        {
+            "timestamp": "2026-08-30T11:00:05Z", "type": "assistant",
+            "uuid": "background-answer", "sessionId": "claude-session-1",
+            "message": {
+                "id": "msg-background", "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Synthetic automated reply"}],
+            },
+        },
+    ])
+    _write_jsonl(root / "session.jsonl", records)
+    storage = BufferedStorage(InMemoryStorage()) if buffered else InMemoryStorage()
+    try:
+        parser = local_agents._parse_claude
+
+        def old_parser(path: Path, *, home: Path | None):
+            parsed = parser(path, home=home)
+            parsed.turns[-1].request = "Synthetic background task completed"
+            parsed.turns[-1].legacy_request = parsed.turns[-1].request
+            parsed.turns[-1].automatic = False
+            return parsed
+
+        with monkeypatch.context() as patch:
+            patch.setattr(local_agents, "_parse_claude", old_parser)
+            assert capture_local_agents(
+                storage, tenant_id="local", claude_root=root,
+            ).stored == 1
+        assert capture_local_agents(
+            storage, tenant_id="local", claude_root=root,
+            capture_content=capture_content,
+        ).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        assert bundle.turns[-1].user_request_redacted is None
+        trace_ids = {
+            event.trace_id for event in bundle.events
+            if event.turn_id == bundle.turns[-1].turn_id
+            and event.trace_id is not None
+        }
+        assert len(trace_ids) == 1
+        assert storage.get_trace(next(iter(trace_ids))).prompt_redacted is None
+    finally:
+        storage.close()
+
+
 def test_codex_capture_is_idempotent_and_content_on_by_default(tmp_path: Path) -> None:
     root = tmp_path / "codex"
     _write_jsonl(root / "session.jsonl", _codex_records())
@@ -686,6 +1257,7 @@ def test_codex_capture_is_idempotent_and_content_on_by_default(tmp_path: Path) -
     assert bundle.turns[0].response_state is EvidenceState.PRESENT
     assert bundle.turns[0].user_request_redacted == "fix the test private payload"
     assert bundle.turns[0].final_response_redacted == "fixed"
+    assert bundle.turns[0].progress_redacted == ""
     assert bundle.turns[0].input_tokens == 20
     assert bundle.turns[0].cached_input_tokens == 8
     assert bundle.turns[0].output_tokens == 4
@@ -701,6 +1273,166 @@ def test_codex_capture_is_idempotent_and_content_on_by_default(tmp_path: Path) -
     assert all(event.trace_id is None for event in bundle.events)
     assert "<environment_context>" not in repr(bundle)
     assert any(event.privacy_classification is PrivacyClassification.REDACTED for event in bundle.events)
+
+
+def test_codex_progress_is_bounded_redacted_and_does_not_shift_event_ids(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    path = root / "session.jsonl"
+    _write_jsonl(path, records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    before = storage.list_agent_run_bundles("local")[0]
+    event_ids = [event.event_id for event in before.events]
+    storage.close()
+    # Simulate a populated pre-progress store, then let storage initialization
+    # add the column before the same source is rescanned.
+    with sqlite3.connect(tmp_path / "verdict.db") as old:
+        old.execute("ALTER TABLE agent_turns DROP COLUMN progress_redacted")
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    records.insert(6, {
+        "timestamp": "2026-08-30T10:01:04.500Z",
+        "type": "response_item",
+        "payload": {"type": "message", "role": "assistant", "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "Checking alice@example.com now"}]},
+    })
+    _write_jsonl(path, records)
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    after = storage.list_agent_run_bundles("local")[0]
+    assert [event.event_id for event in after.events] == event_ids
+    progress = after.turns[0].progress_redacted
+    assert progress is not None
+    assert "Checking <EMAIL> now" in progress
+    assert "alice@example.com" not in repr(after)
+    detail = build_agent_run_detail(tmp_path / "verdict.db", tenant="local",
+                                    run_id=after.run.run_id)
+    assert detail["turns"][0]["progress"] == progress
+    assert storage.list_agent_run_bundles("other") == []
+    storage.close()
+
+
+def test_codex_progress_respects_metadata_only_and_message_bound(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    updates = [{
+        "timestamp": f"2026-08-30T10:01:{index + 7:02d}Z", "type": "response_item",
+        "payload": {"type": "message", "role": "assistant", "phase": "commentary",
+                    "content": [{"type": "output_text", "text": f"update {index} " + "x" * 300}]},
+    } for index in range(20)]
+    records[6:6] = updates
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root,
+                                capture_content=False).stored == 1
+    [turn] = storage.list_agent_run_bundles("local")[0].turns
+    assert turn.progress_redacted is None
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root,
+                                capture_content=True).stored == 1
+    [turn] = storage.list_agent_run_bundles("local")[0].turns
+    assert turn.progress_redacted is not None
+    assert "8 earlier recorded updates omitted" in turn.progress_redacted
+    assert "update 0" not in turn.progress_redacted
+    assert "update 8" in turn.progress_redacted
+    assert "update 19" in turn.progress_redacted
+    assert len(turn.progress_redacted.encode()) <= 4_096
+    storage.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "buffered", "sqlite", "postgres"])
+def test_active_codex_progress_window_advances_on_verified_append(
+    tmp_path: Path, backend: str,
+) -> None:
+    root = tmp_path / "codex"
+    path = root / "session.jsonl"
+    records = _codex_records()[:4]
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage import PostgresStorage
+
+            dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                            allow_any_database=False)
+            if dsn is None:
+                pytest.skip(reason)
+            storage_url = stack.enter_context(isolated_test_dsn(dsn))
+            storage = PostgresStorage(storage_url)
+        elif backend in {"memory", "buffered"}:
+            storage_url = None
+            storage = InMemoryStorage()
+            if backend == "buffered":
+                storage = BufferedStorage(storage)
+        else:
+            storage_url = str(tmp_path / "verdict.db")
+            storage = SQLiteStorage(storage_url)
+        stack.callback(storage.close)
+        for count in range(1, 15):
+            records.append({
+                "timestamp": f"2026-08-30T10:01:{count + 3:02d}Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "phase": "commentary",
+                            "content": [{"type": "output_text", "text": f"update {count}"}]},
+            })
+            _write_jsonl(path, records)
+            summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+            assert summary.stored == 1, summary.as_dict()
+            if count >= 12:
+                [bundle] = storage.list_agent_run_bundles("local")
+                progress = bundle.turns[0].progress_redacted
+                assert progress is not None and f"update {count}" in progress
+                if storage_url is not None:
+                    detail = build_agent_run_detail(storage_url, tenant="local",
+                                                    run_id=bundle.run.run_id)
+                    assert f"update {count}" in detail["turns"][0]["progress"]
+        assert "· update 1\n" not in progress
+        assert "2 earlier recorded updates omitted" in progress
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root,
+                                    capture_content=False).stored == 1
+        assert storage.list_agent_run_bundles("local")[0].turns[0].progress_redacted == progress
+        assert storage.list_agent_run_bundles("other") == []
+        if storage_url is not None:
+            with TestClient(create_app(storage=storage_url, tenant_id="local")) as client:
+                response = client.get(f"/api/runs/{bundle.run.run_id}")
+            assert response.status_code == 200
+            assert response.json()["turns"][0]["progress"] == progress
+        records[-1]["payload"]["content"][0]["text"] = "update XX"
+        _write_jsonl(path, records)
+        rejected = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert rejected.stored == 0
+        assert rejected.skip_reasons == {"local_source_conflict": 1}
+        assert storage.list_agent_run_bundles("local")[0].turns[0].progress_redacted == progress
+
+
+def test_codex_progress_reaches_postgres_run_api(tmp_path: Path) -> None:
+    from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+    from verdict.storage import PostgresStorage
+
+    dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                    allow_any_database=False)
+    if dsn is None:
+        pytest.skip(reason)
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records.insert(6, {
+        "timestamp": "2026-08-30T10:01:04.500Z", "type": "response_item",
+        "payload": {"type": "message", "role": "assistant", "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "Checking alice@example.com"}]},
+    })
+    _write_jsonl(root / "session.jsonl", records)
+    with isolated_test_dsn(dsn) as storage_url:
+        storage = PostgresStorage(storage_url)
+        try:
+            assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+            [bundle] = storage.list_agent_run_bundles("local")
+            detail = build_agent_run_detail(storage_url, tenant="local", run_id=bundle.run.run_id)
+            assert "Checking <EMAIL>" in detail["turns"][0]["progress"]
+            assert "alice@example.com" not in repr(detail)
+            with pytest.raises(KeyError):
+                build_agent_run_detail(storage_url, tenant="other",
+                                       run_id=bundle.run.run_id)
+        finally:
+            storage.close()
 
 
 def test_current_codex_user_message_reaches_redacted_turn_and_detail(tmp_path: Path) -> None:
@@ -2977,7 +3709,8 @@ def test_claude_recent_model_call_enriches_same_fact_and_trace_on_append(
     assert initial_trace.input_tokens == 12
     assert initial_trace.output_tokens is None
     old_judgment = Judgment(trace_id=initial_trace.trace_id,
-                            evaluator_fingerprint="a" * 64)
+                            evaluator_fingerprint="a" * 64,
+                            evaluated_trace_fingerprint=trace_evidence_fingerprint(initial_trace))
     storage.insert_judgment(old_judgment)
     assert storage.list_judgments_for_trace(initial_trace.trace_id)[0].judgment_id == (
         old_judgment.judgment_id
@@ -3008,7 +3741,8 @@ def test_claude_recent_model_call_enriches_same_fact_and_trace_on_append(
             (old_judgment.judgment_id,),
         ).fetchone() is not None
     current_judgment = Judgment(trace_id=trace.trace_id,
-                                evaluator_fingerprint="a" * 64)
+                                evaluator_fingerprint="a" * 64,
+                                evaluated_trace_fingerprint=trace_evidence_fingerprint(trace))
     storage.insert_judgment(current_judgment)
     assert [item.judgment_id for item in storage.list_judgments_for_trace(
         trace.trace_id
@@ -3059,7 +3793,10 @@ def test_claude_model_fact_enrichment_after_window_moves(
     [bundle] = storage.list_agent_run_bundles("local")
     model = storage.get_recent_local_events("local", bundle.run.run_id)["events"][-1]
     [initial_trace] = storage.list_traces(tenant_id="local", limit=2_000)
-    old_judgment = Judgment(trace_id=initial_trace.trace_id, evaluator_fingerprint="a" * 64)
+    old_judgment = Judgment(
+        trace_id=initial_trace.trace_id, evaluator_fingerprint="a" * 64,
+        evaluated_trace_fingerprint=trace_evidence_fingerprint(initial_trace),
+    )
     storage.insert_judgment(old_judgment)
     for index in range(60):
         rows.append({
@@ -3092,7 +3829,10 @@ def test_claude_model_fact_enrichment_after_window_moves(
     assert trace.output_tokens == 3
     assert trace.response_redacted == "synthetic answer"
     assert storage.list_judgments_for_trace(trace.trace_id) == []
-    current_judgment = Judgment(trace_id=trace.trace_id, evaluator_fingerprint="a" * 64)
+    current_judgment = Judgment(
+        trace_id=trace.trace_id, evaluator_fingerprint="a" * 64,
+        evaluated_trace_fingerprint=trace_evidence_fingerprint(trace),
+    )
     storage.insert_judgment(current_judgment)
     assert [item.judgment_id for item in storage.list_judgments_for_trace(
         trace.trace_id
@@ -4450,6 +5190,50 @@ def test_incomplete_local_line_blocks_selected_ai_until_completed_append(
         storage, storage_url=f"sqlite:///{storage_path}", tenant="local", config=config,
     )
     assert second["plannedCalls"] == 1
+    storage.close()
+
+
+def test_codex_capture_can_preview_adjacent_turn_review_without_whole_session(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records(secret="synthetic task")
+    records.insert(6, {"timestamp": "2026-08-30T10:01:04.500Z", "type": "response_item",
+                       "payload": {"type": "message", "role": "assistant", "phase": "commentary",
+                                   "content": [{"type": "output_text", "text": "Checking the test"}]}})
+    records.extend([
+        {"timestamp": "2026-08-30T10:02:00Z", "type": "event_msg",
+         "payload": {"type": "task_started", "turn_id": "turn-b"}},
+        {"timestamp": "2026-08-30T10:02:01Z", "type": "event_msg",
+         "payload": {"type": "user_message", "message": "The test still fails; please correct it"}},
+        {"timestamp": "2026-08-30T10:02:02Z", "type": "event_msg",
+         "payload": {"type": "agent_message", "phase": "final_answer", "message": "I will check again"}},
+        {"timestamp": "2026-08-30T10:02:03Z", "type": "event_msg",
+         "payload": {"type": "task_complete", "turn_id": "turn-b",
+                     "last_agent_message": "I will check again"}},
+    ])
+    _write_jsonl(root / "session.jsonl", records)
+    path = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(path))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    assert len(bundle.turns) == 2
+    config = {"scope": "turn_window", "runId": bundle.run.run_id,
+              "turnId": bundle.turns[1].turn_id, "provider": "anthropic",
+              "model": "claude-haiku-4-5", "rubric": {"name": "correction", "version": "1",
+                  "dimensions": [{"name": "correction", "description": "Did the user correct the agent?"}]}}
+    with TestClient(create_app(storage=f"sqlite:///{path}", tenant_id="local")) as client:
+        token = client.get("/api/setup/token").json()["setupToken"]
+        preview = client.post("/api/scoped/preview", json=config,
+                              headers={"X-Verdict-Setup": token})
+    assert preview.status_code == 200
+    evidence = preview.json()["evidencePreview"]
+    assert preview.json()["plannedCalls"] == 1
+    assert "The test still fails" in evidence["query"]
+    assert "fixed" in evidence["response"]
+    assert "Checking the test" in evidence["response"]
+    assert evidence["evidenceReferences"] == [
+        f"turn:{bundle.turns[0].turn_id}", f"turn:{bundle.turns[1].turn_id}",
+        *[f"event:{event.event_id}" for event in bundle.events],
+    ]
     storage.close()
 
 

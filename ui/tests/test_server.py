@@ -23,6 +23,106 @@ from verdict.schema import (
 from verdict.storage import SQLiteStorage
 
 
+def test_trace_list_defers_long_facts_until_exact_selection(tmp_path):
+    path = tmp_path / "long-trace-list.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    storage.insert_trace(Trace(
+        trace_id="long", provider="synthetic", request_model="example",
+        prompt_redacted="A" * 40_000 + " https://example.invalid/private",
+        response_redacted="B" * 40_000,
+        error="E" * 40_000, started_at=now, ended_at=now,
+    ))
+    storage.insert_trace(Trace(
+        trace_id="short", provider="synthetic", request_model="example",
+        prompt_redacted="short prompt", response_redacted="short reply",
+        started_at=now + timedelta(seconds=1), ended_at=now + timedelta(seconds=1),
+    ))
+    storage.close()
+    # A legacy row can predate persistence redaction. The read boundary must
+    # redact the complete selected value before shortening it for the API.
+    legacy_prompt = "A" * 7_995 + " https://example.invalid/private" + "B" * 40_000 + "\x00"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE traces SET prompt_redacted=? WHERE trace_id='long'",
+            (legacy_prompt,),
+        )
+
+    listed = build_bundle(path)
+    by_id = {sample["trace_id"]: sample for sample in listed["samples"]}
+    assert by_id["short"]["deterministicFacts"]["responseCharacters"] == 11
+    long = by_id["long"]
+    assert long["contentCaptured"] is True
+    assert long["providerStatus"] == "provider_error"
+    assert long["traceState"] == "error_recorded"
+    assert long["promptPreviewDeferred"] is True
+    assert long["responsePreviewDeferred"] is True
+    assert long["errorPreviewDeferred"] is True
+    assert long["deterministicFacts"] is None
+    assert "example.invalid" not in json.dumps(listed)
+
+    selected = build_bundle(path, trace_id="long")
+    exact = next(sample for sample in selected["samples"] if sample["trace_id"] == "long")
+    assert exact["promptPreviewDeferred"] is False
+    assert exact["responsePreviewDeferred"] is False
+    assert exact["errorPreviewDeferred"] is False
+    assert exact["promptPreviewTruncated"] is True
+    assert exact["deterministicFacts"]["responseCharacters"] == 40_000
+    assert exact["deterministicFacts"]["providerOutcome"] == "failed"
+
+    import httpx
+
+    async def request_exact():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/data?trace_id=long")
+
+    response = asyncio.run(request_exact())
+    assert response.status_code == 200
+    assert "example.invalid" not in response.text
+    assert next(sample for sample in response.json()["samples"] if sample["trace_id"] == "long")[
+        "deterministicFacts"
+    ]["responseCharacters"] == 40_000
+
+
+def test_trace_aggregate_queries_read_error_presence_without_full_text(tmp_path, monkeypatch):
+    path = tmp_path / "aggregate-error.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    storage.insert_trace(Trace(
+        trace_id="synthetic-error", provider="synthetic", request_model="example",
+        error="E" * 40_000, started_at=now, ended_at=now,
+    ))
+    storage.insert_trace(Trace(
+        trace_id="empty-error", provider="synthetic", request_model="example",
+        error="", started_at=now + timedelta(seconds=1),
+        ended_at=now + timedelta(seconds=1),
+    ))
+    storage.close()
+
+    queries = []
+    original_execute = server_module._SQLiteSession.execute
+
+    def observe_query(session, query, params=()):
+        queries.append(query)
+        return original_execute(session, query, params)
+
+    monkeypatch.setattr(server_module._SQLiteSession, "execute", observe_query)
+    bundle = build_bundle(path)
+    assert all(sample["providerStatus"] == "provider_error" for sample in bundle["samples"])
+    assert bundle["managementReport"]["scope"]["errorRecordedCalls"] == 2
+    assert bundle["providers"][0]["errors"] == 2
+    assert bundle["providers"][0]["errorRate"] == 100.0
+    provider_key = bundle["providers"][0]["key"]
+    assert any(row[f"{provider_key}_err"] == 100.0 for row in bundle["tsRows"])
+    aggregate_queries = [query for query in queries if "WHERE trace_id IN (" not in query and query.startswith(
+        ("SELECT trace_id, provider, request_model, ",
+         "SELECT provider, started_at, latency_ms, ")
+    )]
+    assert len(aggregate_queries) == 2
+    assert all("error IS NOT NULL AS error_present" in query for query in aggregate_queries)
+
+
 def test_trace_explorer_date_filters_before_paging_and_preserves_utc_boundary(tmp_path, monkeypatch):
     monkeypatch.setattr(server_module, "_now_utc", lambda: datetime(2026, 10, 18, tzinfo=timezone.utc))
     path = tmp_path / "date-filter.db"
@@ -1715,6 +1815,10 @@ def test_host_routed_tenant_cannot_calibrate_process_tenant_health(
     monkeypatch.setattr(
         "verdict.dashboard.evaluator_lab.execute_calibration", calibration_stub
     )
+    monkeypatch.setattr(
+        "verdict.dashboard.evaluator_lab.preview_calibration",
+        lambda **_kwargs: {"upperStaticListPriceUsd": 0.01},
+    )
     host = FastAPI()
 
     @host.middleware("http")
@@ -1742,11 +1846,11 @@ def test_host_routed_tenant_cannot_calibrate_process_tenant_health(
             )
             foreign_run = await client.post(
                 "/verdict/api/evaluators/calibration/run", headers=headers_b,
-                json={"labelSetPath": "unused"},
+                json={"labelSetPath": "unused", "maxEstimatedUsd": 0.01},
             )
             own_run = await client.post(
                 "/verdict/api/evaluators/calibration/run", headers=headers_a,
-                json={"labelSetPath": "unused"},
+                json={"labelSetPath": "unused", "maxEstimatedUsd": 0.01},
             )
             own_data = await client.get("/verdict/api/data", headers=headers_a)
             foreign_data = await client.get("/verdict/api/data", headers=headers_b)

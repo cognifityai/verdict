@@ -8,8 +8,10 @@ from verdict.dashboard.query import QuerySession
 from verdict.evidence import AgentRunBundle
 from verdict.local_source_revision import LocalSourceRevision, revision_from_row
 from verdict.normalized_evidence import bundle_from_normalized_rows
+from verdict.redaction import redact_structure
 
 _TABLES = ("import_sources", "agent_runs", "agent_turns", "agent_events")
+_MAX_FOLLOWUP_TEXT_CHARACTERS = 65_536
 
 
 def local_revisions(
@@ -99,6 +101,99 @@ def count_runs(session: QuerySession, tenant_id: str, *, source_kind: str | None
             (tenant_id, *values),
         ).fetchone()
     return int(row["count"] if row else 0)
+
+
+def recent_followups(session: QuerySession, tenant_id: str, *, limit: int, offset: int) -> dict:
+    """List answered prior Turns followed by an ended recorded request in the same run."""
+    if not available(session):
+        return {"followups": [], "page": {"shown": 0, "limit": limit, "hasMore": False}}
+    rows = list(session.execute(
+        """SELECT t.run_id,t.turn_id,p.turn_id AS prior_turn_id,t.started_at,
+                  t.user_request_redacted AS request_text,
+                  p.final_response_redacted AS prior_response_text,
+                  r.agent_name,s.source_kind
+           FROM agent_turns t JOIN agent_turns p ON
+             p.tenant_id=t.tenant_id AND p.run_id=t.run_id
+             AND p.sequence=t.sequence-1
+           JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id
+           JOIN import_sources s ON s.tenant_id=r.tenant_id
+             AND s.source_session_id=r.source_session_id
+           WHERE t.tenant_id=? AND p.request_state='present'
+             AND p.response_state='present' AND t.request_state='present'
+             AND p.ended_at IS NOT NULL AND t.ended_at IS NOT NULL
+             AND NOT p.request_truncated AND NOT p.response_truncated
+             AND NOT t.request_truncated
+             AND p.user_request_redacted IS NOT NULL
+             AND p.final_response_redacted IS NOT NULL
+             AND t.user_request_redacted IS NOT NULL
+             AND LENGTH(p.user_request_redacted)<=65536
+             AND LENGTH(p.final_response_redacted)<=65536
+             AND LENGTH(t.user_request_redacted)<=65536
+           ORDER BY t.started_at DESC,t.run_id DESC,t.turn_id DESC
+           LIMIT ? OFFSET ?""",
+        (tenant_id, limit + 1, offset),
+    ))
+    visible = rows[:limit]
+    return {
+        "followups": [{
+            "runId": row["run_id"], "turnId": row["turn_id"],
+            "priorTurnId": row["prior_turn_id"],
+            "sourceKind": row["source_kind"], "agentName": row["agent_name"] or None,
+            "startedAt": row["started_at"],
+            "requestExcerpt": _safe_followup_excerpt(row["request_text"]),
+            "priorResponseExcerpt": _safe_followup_excerpt(row["prior_response_text"]),
+        } for row in visible],
+        "page": {"shown": len(visible), "limit": limit, "hasMore": len(rows) > limit},
+    }
+
+
+def _safe_followup_excerpt(value: str) -> str:
+    """Inspect the whole bounded text so a secret cannot straddle 160 chars."""
+    if not isinstance(value, str) or len(value) > _MAX_FOLLOWUP_TEXT_CHARACTERS:
+        raise ValueError("follow-up text exceeds preview limit")
+    safe = redact_structure(value)
+    if not isinstance(safe, str):
+        raise ValueError("follow-up excerpt unavailable")
+    return safe[:160]
+
+
+def followup_pair(
+    session: QuerySession, tenant_id: str, run_id: str, turn_id: str,
+) -> dict[str, str]:
+    """Read one complete adjacent text pair for an operator review."""
+    if not available(session):
+        raise KeyError(turn_id)
+    selected = session.execute(
+        "SELECT 1 FROM agent_turns WHERE tenant_id=? AND run_id=? AND turn_id=?",
+        (tenant_id, run_id, turn_id),
+    ).fetchone()
+    if selected is None:
+        raise KeyError(turn_id)
+    row = session.execute(
+        """SELECT p.turn_id AS prior_turn_id,
+                  p.user_request_redacted AS prior_request,
+                  p.final_response_redacted AS prior_answer,
+                  t.user_request_redacted AS later_request
+           FROM agent_turns t JOIN agent_turns p ON
+             p.tenant_id=t.tenant_id AND p.run_id=t.run_id
+             AND p.sequence=t.sequence-1
+           WHERE t.tenant_id=? AND t.run_id=? AND t.turn_id=?
+             AND p.request_state='present' AND p.response_state='present'
+             AND t.request_state='present'
+             AND p.ended_at IS NOT NULL AND t.ended_at IS NOT NULL
+             AND NOT p.request_truncated AND NOT p.response_truncated
+             AND NOT t.request_truncated
+             AND p.user_request_redacted IS NOT NULL
+             AND p.final_response_redacted IS NOT NULL
+             AND t.user_request_redacted IS NOT NULL
+             AND LENGTH(p.user_request_redacted)<=65536
+             AND LENGTH(p.final_response_redacted)<=65536
+             AND LENGTH(t.user_request_redacted)<=65536""",
+        (tenant_id, run_id, turn_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError("complete adjacent text unavailable")
+    return {key: str(value) for key, value in row.items()}
 
 
 def list_run_rows(
@@ -298,6 +393,7 @@ def load_run_page(
     turn_limit: int,
     turn_offset: int,
     event_id: str | None,
+    turn_id: str | None = None,
 ) -> dict[str, object] | None:
     """Read one run and bounded child pages without constructing a whole bundle."""
     if not available(session):
@@ -344,10 +440,21 @@ def load_run_page(
         + " LIMIT ? OFFSET ?",  # nosec B608 -- order is a fixed schema expression
         (tenant_id, run_id, event_limit, resolved_offset),
     ))
+    resolved_turn_offset = turn_offset
+    if turn_id is not None:
+        focused_turn = session.execute(
+            "SELECT ordinal FROM (SELECT turn_id,ROW_NUMBER() OVER "
+            "(ORDER BY sequence,turn_id)-1 AS ordinal FROM agent_turns "
+            "WHERE tenant_id=? AND run_id=?) page WHERE turn_id=?",
+            (tenant_id, run_id, turn_id),
+        ).fetchone()
+        if focused_turn is None:
+            raise KeyError(turn_id)
+        resolved_turn_offset = (int(focused_turn["ordinal"]) // turn_limit) * turn_limit
     turns = list(session.execute(
         """SELECT * FROM agent_turns WHERE tenant_id=? AND run_id=?
            ORDER BY sequence,turn_id LIMIT ? OFFSET ?""",
-        (tenant_id, run_id, turn_limit, turn_offset),
+        (tenant_id, run_id, turn_limit, resolved_turn_offset),
     ))
     return {
         "run": run,
@@ -357,6 +464,7 @@ def load_run_page(
         "turnCount": int(turn_count["count"] if turn_count else 0),
         "producerCount": int(producer_count["count"] if producer_count else 0),
         "eventOffset": resolved_offset,
+        "turnOffset": resolved_turn_offset,
     }
 
 
