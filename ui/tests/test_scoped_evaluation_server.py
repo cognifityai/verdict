@@ -118,7 +118,8 @@ def test_direct_scoped_judge_requires_a_current_static_price_ceiling_before_egre
     approved = {**config, "planFingerprint": preview["planFingerprint"]}
     approved.pop("maxEstimatedUsd")
     provider = MockProvider()
-    for cap in (None, 0, -1, True, "1", bound / 2, 101, float("nan"), float("inf")):
+    for cap in (None, 0, -1, True, "1", bound / 2, 101, float("nan"), float("inf"),
+                10**400, -(10**400)):
         candidate = {**approved}
         if cap is not None:
             candidate["maxEstimatedUsd"] = cap

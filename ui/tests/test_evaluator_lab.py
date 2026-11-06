@@ -200,7 +200,7 @@ def test_dashboard_evaluator_run_requires_static_spend_limit_before_egress(tmp_p
             assert missing.status_code == 400
             assert provider.calls == 0
             bound = preview["upperStaticListPriceUsd"]
-            for invalid in (bound / 2, 0, -1, True, "1", 101):
+            for invalid in (bound / 2, 0, -1, True, "1", 101, 10**400, -(10**400)):
                 low = await client.post("/api/evaluators/run",
                                         json={**approved, "maxEstimatedUsd": invalid}, headers=headers)
                 assert low.status_code == 400

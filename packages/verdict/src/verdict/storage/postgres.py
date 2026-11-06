@@ -3798,7 +3798,7 @@ class PostgresStorage:
         "j.created_at, j.judge_models, j.dimensions, "
         "j.position_swap_consistent, j.evaluator_provider, "
         "j.evaluator_config, j.evaluator_fingerprint, "
-        "j.expected_dimensions, j.status, j.error"
+        "j.expected_dimensions, j.status, j.error, j.local_recent_evidence_fingerprint"
     )
 
     def insert_judgment(self, judgment: Judgment) -> None:
@@ -3879,6 +3879,7 @@ class PostgresStorage:
             status=JudgmentStatus(row[12] or "completed"),
             error=row[13],
             position_swap_consistent=row[7],
+            evaluated_trace_fingerprint=row[14],
         )
 
     def list_judgments_for_cluster(

@@ -3863,6 +3863,7 @@ class SQLiteStorage:
             status=JudgmentStatus(row["status"] or "completed"),
             error=row["error"],
             position_swap_consistent=None if swap is None else bool(swap),
+            evaluated_trace_fingerprint=row["local_recent_evidence_fingerprint"],
         )
 
     def list_judgments_for_cluster(
