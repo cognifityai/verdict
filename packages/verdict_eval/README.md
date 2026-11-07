@@ -37,8 +37,10 @@ Trace/Turn judge and conversation grading share. It finds the JSON inside a
 Markdown fence or surrounding prose and accepts the per-dimension results as
 an object keyed by dimension name, inside an outer `dimensions` object, or as
 a list of objects that carry `name`. It rejects duplicate keys, duplicate
-dimension names, non-finite numbers and replies over 64 KB. A complete but
-malformed reply is normalized to `UNCLEAR` per dimension; a reply the provider
+dimension names, non-finite numbers and replies over 64 KB. For trace and turn
+judging, a complete but malformed reply is normalized to `UNCLEAR` per
+dimension; conversation grading stores it as an `error` assessment with
+`invalid_judge_output`; a reply the provider
 cut off at the output ceiling, or an oversized one, raises
 `JudgeOutputUnusable` so callers record a retryable judge error. Conversation
 grading stores a finding's `issue` label in identifier form (words joined with
@@ -134,9 +136,9 @@ The registry lifecycle is `normalize`, `fit`, `assign`, `validate`, then
 verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
   normalize --limit 1000
 verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
-  fit --strategy explicit --target-workload agent
+  fit --strategy explicit --target-workload agent --cutoff 2026-11-01T00:00:00Z
 verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
-  assign --version "$VERSION"
+  assign --version "$VERSION" --through-cutoff 2026-11-01T00:00:00Z
 verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
   validate --version "$VERSION"
 verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \

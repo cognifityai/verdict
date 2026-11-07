@@ -14,9 +14,10 @@ the product is refined.
   to reviewed local checks and exact run evidence. Call-only stores can inspect
   captured calls without activating a model-call monitor.
 - Optional adjacent-turn review and selected-turn evaluation show bounded
-  recorded evidence separately from human labels and judge opinions. Paid
-  dashboard actions require an approved static list-price limit; unknown-priced
-  destinations cannot use those actions.
+  recorded evidence separately from human labels and judge opinions. Scoped
+  evaluation, AI explanations, and Evaluator Lab judge calls require an approved
+  static list-price limit; unknown-priced destinations cannot use those
+  actions. The Inspect JSON judge is not covered by this limit.
 - Groups shows explicitly application-reported boolean outcomes with missing
   and conflicting reports retained as coverage states.
 

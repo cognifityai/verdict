@@ -21,11 +21,15 @@ Verdict requires Python 3.10 or newer. From the repository root:
 ```bash
 uv venv --python 3.12
 source .venv/bin/activate
-pip install -e "packages/verdict[anthropic,openai,google,dashboard]"
-pip install -e packages/verdict_eval
+pip install -e "packages/verdict[anthropic,openai,google,dashboard,telemetry,postgres]"
+pip install -e "packages/verdict_eval[jev]"
 pip install -e packages/verdict_inspect
-pip install pytest pytest-asyncio ruff
+pip install pytest pytest-asyncio ruff httpx httpx2 -r ui/requirements.txt
 ```
+
+Several test modules import the telemetry and `jev` extras at module level, so
+the suite does not collect without them. PostgreSQL tests are skipped unless a
+disposable database is configured as in `.github/workflows/test.yml`.
 
 While editing, run the tests for the changed package or workflow. Run the full
 suite once for the final pull request candidate, along with the key-free smoke
@@ -34,6 +38,7 @@ check:
 ```bash
 python scripts/smoke_test.py
 python -m pytest -q
+pnpm --dir ui test
 ```
 
 Run `ruff check <changed Python files>` for Python files you modify.

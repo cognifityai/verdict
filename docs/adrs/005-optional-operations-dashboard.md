@@ -1,6 +1,8 @@
 # ADR-005: Extend the dashboard through an optional operations API
 
-**Status:** Accepted
+**Status:** Accepted (the read-only statement below applies to the operations
+integration; the dashboard has since gained its own setup-authorized write
+routes for capture, analysis, monitoring, and approved evaluation)
 **Date:** 2026-08-20
 **Decider:** Cognifity AI
 

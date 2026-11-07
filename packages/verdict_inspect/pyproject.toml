@@ -1,7 +1,7 @@
 [project]
 name = "cognifity-verdict-inspect"
 version = "0.1.0b6"
-description = "Verdict Inspect — analyze chat exports for drift, hedging, refusals, and quality. Drop in a conversations.json from ChatGPT/Claude/Cursor, get a report."
+description = "Verdict Inspect — analyze chat exports for drift, hedging, refusals, and quality. Drop in a ChatGPT, Claude.ai, OpenAI-format, or agent-session export, get a report."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

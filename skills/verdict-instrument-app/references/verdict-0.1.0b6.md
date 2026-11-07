@@ -79,9 +79,9 @@ pinned to the authorized tenant's active version.
 - Use the same protected PostgreSQL DSN for shared or multi-instance capture and
   the dashboard; install the `postgres` extra.
 - Moving SQLite data to PostgreSQL is a separate migration, not a package upgrade.
-- The Registry tab is a bounded read-only view. When a mounted host injects its
-  authorized registry tenant, that active registry also supplies Overview,
-  Trace Explorer, pass-rate, and drift labels. Mounted hosts own tenant
+- The cluster registry is a bounded view under **Monitoring → Groups**. When a
+  mounted host injects its authorized registry tenant, that active registry also
+  supplies Home, LLM Calls, pass-rate, and drift labels. Mounted hosts own tenant
   authorization and mutations through the existing same-origin Operations adapter.
 
 `VerdictClient.runtime_metrics` exposes aggregate process-local counters and

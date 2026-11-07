@@ -228,7 +228,7 @@ for drift, retention, dashboard, and rollback verification.
 ### 8. Schedule only the verified cycle
 
 Discover and recommend analysis, retention cleanup, and health checks separately.
-Verdict can save an opt-in analysis schedule in **Monitor > Schedule** and run it
+Verdict can save an opt-in analysis schedule from **Monitoring → Start recurring checks** (Suggested setup) and run it
 with `VERDICT_STORAGE` in the supervised process environment and
 `verdict-service --tenant-id <routing-id> --once`, using the same non-sensitive
 routing ID as the dashboard (or omitting the option only when both use the

@@ -195,8 +195,9 @@ required when the user asks to see the dashboard; API success alone does not pro
 visible UI. State that dashboard alerts are not outbound notifications.
 
 Basic authentication is enabled only when both `VERDICT_USER` and `VERDICT_PASS`
-are non-empty. Fail readiness when exactly one is set. Treat `/` and `/api/health`
-as public even when auth is enabled; only `/dashboard` and `/api/data` are gated.
+are non-empty. Fail readiness when exactly one is set. With auth enabled, `/`,
+`/dashboard`, the API documentation, and every `/api/*` route except
+`/api/health` are gated; `/api/health` and static assets stay public.
 
 ## Retention gate
 

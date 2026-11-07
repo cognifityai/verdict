@@ -106,8 +106,10 @@ Areas under consideration:
   non-local deployment.
 - Quality judging and Monitor comparisons are periodic batch operations, not a
   streaming alert service.
-- The current Monitor policy supports one tenant scope and refuses to pool a
-  mixed-tenant database.
+- The current Monitor policy supports one tenant scope and reads only that
+  tenant's traces. The legacy `verdict-pipeline` without a registry mode refuses
+  a mixed-tenant database. Monitor input is capped at 100,000 stored traces per
+  tenant, including judge traces; above that it reports an error.
 - Cost values are estimates from a dated static base-price table; caching,
   long-context tiers, batch/priority modes, tools, regional uplifts, and
   negotiated discounts are not modeled.
@@ -121,7 +123,9 @@ Areas under consideration:
   local mapping and pagination behavior, not live compatibility with every
   hosted deployment; credentialed pre-release checks remain required.
 - Judge calls run sequentially. Verdict does not yet retain judge token/cost
-  usage or enforce an evaluation budget.
+  usage. Dashboard scoped, explanation, and Evaluator Lab calls require a static
+  list-price limit, and conversation grading caps calls per run; the
+  `verdict-pipeline` CLI and the Inspect judge enforce no budget.
 - Local tool-call sequences are first-class source evidence and support bounded
   deterministic findings. Manual spans and supported provider traces still do
   not automatically reconstruct an authoritative cross-source agent graph or

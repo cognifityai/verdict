@@ -42,6 +42,13 @@ verdict-inspect analyze --report ./drift_report.md ~/Downloads/chatlog.jsonl
 
 # JSON output for piping
 verdict-inspect analyze --json ~/Downloads/conversations.json | jq .
+
+# Skip the optional judge or the embedding step; pick the judge model
+verdict-inspect analyze --no-judge --no-semantic ~/Downloads/conversations.json
+verdict-inspect analyze --judge-model claude-haiku-4-5-20251001 ~/Downloads/conversations.json
+
+# Show which parser auto-detect would choose
+verdict-inspect detect ~/Downloads/conversations.json
 ```
 
 ## Supported formats

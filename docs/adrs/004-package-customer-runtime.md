@@ -48,7 +48,8 @@ the live dashboard starts empty and reports load failure instead of substituting
 sample metrics.
 
 Customer analysis commands belong to the package that owns their domain logic:
-capture diagnostics in `cognifity-verdict`, evaluation and drift commands in
+capture diagnostics and the `verdict-monitor` statistical comparison in
+`cognifity-verdict`, judge, pipeline, and clustering commands in
 `cognifity-verdict-eval`, and export inspection in `cognifity-verdict-inspect`.
 Research, release, and contributor tools remain repository-only.
 

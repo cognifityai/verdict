@@ -166,7 +166,7 @@ Verdict is useful when you need to answer questions like:
 - Did a prompt, model, or provider change alter response quality?
 - Which traces should a human reviewer look at first?
 - Is a cheaper judge model consistent enough for this workload?
-- Are errors, latency, token usage, or costs changing after a release?
+- Are provider errors, blank responses, refusals, or judged quality changing after a release? (Latency, token, and cost changes are shown descriptively, not statistically tested.)
 
 ## Current Scope
 
@@ -214,7 +214,9 @@ explicit IDs become unlinked spans with a link-status attribute; standalone
 spans remain explicit. Provider buffering cannot decide whether a span survives
 and does not trigger repair writes: every ended span is written once. Retention
 removes expired standalone and orphan records but preserves a span referenced by
-a retained trace.
+a retained trace. Pruning runs only when an operator calls
+`Storage.prune_before()`; nothing in the dashboard or worker invokes it, and it
+does not delete agent runs, turns, or events.
 
 ## Security And Privacy Notes
 
@@ -314,7 +316,7 @@ application.
 - `docs/v1-roadmap.md`: planned work and known product boundaries.
 - `packages/verdict/`: SDK, instrumentation, telemetry importers, storage, core
   APIs, and packaged dashboard runtime.
-- `packages/verdict_eval/`: evaluation, clustering, and drift logic.
+- `packages/verdict_eval/`: judges, judge health, clustering, and the semantic and structural drift detectors used by Inspect. The Monitor's statistical comparison lives in `packages/verdict/src/verdict/monitoring.py`.
 - `packages/verdict_inspect/`: inspection CLI and report tools.
 - `ui/`: dashboard source and contributor build tools; compiled customer assets
   ship inside `cognifity-verdict`.

@@ -125,7 +125,7 @@ def init(
                        high-volume production; adds a background flush thread.
         transport: ``"storage"`` keeps the existing direct SQLite/PostgreSQL
                    capture path. ``"file"`` writes bounded process-owned JSONL
-                   records for a local Verdict service to import.
+                   records for `verdict-import agent-file` or the shipper and collector.
         spool_directory: Required local directory when ``transport="file"``.
 
     Returns:
