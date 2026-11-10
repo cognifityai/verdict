@@ -19,7 +19,7 @@ features are especially useful.
 Verdict requires Python 3.10 or newer. From the repository root:
 
 ```bash
-uv venv --python 3.12
+uv venv --seed --python 3.12  # --seed installs pip into the venv
 source .venv/bin/activate
 pip install -e "packages/verdict[anthropic,openai,google,dashboard,telemetry,postgres]"
 pip install -e "packages/verdict_eval[jev]"

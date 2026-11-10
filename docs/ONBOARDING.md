@@ -20,7 +20,7 @@ unrelated `verdict` distribution from PyPI; it exposes the same import namespace
 and cannot safely coexist in one environment.
 
 ```bash
-uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
+uv venv --seed --python 3.12 && source .venv/bin/activate  # --seed adds pip; or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 python -m pip install --pre \
@@ -626,9 +626,11 @@ verdict-dashboard --storage sqlite:///./verdict.db --tenant-id my-team
 ```
 
 Keep the tenant identical across import and dashboard commands. In its
-default `--registry-mode off`, `verdict-pipeline` ignores `--tenant-id`, reads
-every stored trace, and stops with an error when more than one tenant is
-present; use a registry mode to scope it to one tenant. A
+default `--registry-mode off`, `verdict-pipeline` ignores `--tenant-id`, loads
+traces across all tenants up to `--limit` (10,000 by default), and stops with
+an error when the loaded traces span more than one tenant. That check covers
+only the loaded traces, not necessarily the whole database; use a registry mode
+to scope the run to one tenant. A
 non-default `verdict-import local --tenant-id` run prints this requirement. The
 dashboard default remains `__verdict_local__`, and selecting another tenant
 does not migrate or relabel stored rows. Browser `tenant=` parameters cannot
