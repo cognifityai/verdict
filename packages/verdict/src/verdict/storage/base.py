@@ -18,6 +18,7 @@ from verdict.analysis_records import (
 )
 from verdict.evidence import AgentCaptureBatch, AgentRunBundle, AgentTurn
 from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy
+from verdict.run_monitoring import RunMonitorFacts
 from verdict.schema import (
     DriftRun,
     DriftSignal,
@@ -177,6 +178,8 @@ class Storage(Protocol):
         *,
         limit: int = 100,
     ) -> list[AgentRunBundle]: ...
+
+    def load_run_monitor_facts(self, tenant_id: str) -> list[RunMonitorFacts]: ...
 
     def load_logical_session_monitor_evidence(
         self,

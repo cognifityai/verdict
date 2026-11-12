@@ -529,7 +529,7 @@ def test_counts_only_logical_session_preview_tolerates_malformed_event_json(tmp_
     assert "malformed" not in response.text
 
 
-@pytest.mark.parametrize("analysis_unit", ["turn", "run", "session"])
+@pytest.mark.parametrize("analysis_unit", ["turn", "session"])
 def test_monitor_preview_rejects_unsupported_analysis_units(
     tmp_path,
     analysis_unit: str,

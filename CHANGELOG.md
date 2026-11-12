@@ -6,6 +6,14 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- Monitoring can compare recorded Agent Run outcomes historically: failed or
+  timed-out runs, runs with a failed tool result, and runs with a failed model
+  call, with Fisher's exact test, Benjamini–Hochberg correction and the minimum
+  effect, overall or by agent name. Run comparisons are not saved as monitors.
+- The comparison settings expose the minimum change that can raise an alert.
+
 ### Changed
 
 - Monitor's blank-response metric no longer counts a reply that asks the

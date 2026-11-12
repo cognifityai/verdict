@@ -30,8 +30,11 @@ export const metricLabel = (metric) => {
   }
   return ({
     provider_error: "Provider error rate",
-    response_empty: "Blank captured response-text rate",
+    response_empty: "Blank reply rate",
     refusal_signature: "Refusal-language rate",
+    run_failed: "Failed or timed-out run rate",
+    run_tool_error: "Runs with a failed tool result",
+    run_model_call_error: "Runs with a failed model call",
     "agent.execution_completed": "Completed-execution rate",
     "agent.final_output_present": "Final-output presence rate",
   })[metric] || metric.replaceAll("_", " ");
@@ -157,7 +160,7 @@ function MetricComparisonCard({
       <div>
         {metric.group_id && <div className="text-xs mb-1" style={{ color: "#94a39d" }}>Group: <span title={metric.group_id}>{group?.label || metric.group_id}</span></div>}
         <div className="font-semibold">{metricLabel(metric.metric)}</div>
-        {metric.metric === "response_empty" && <div className="text-xs mt-1" style={{ color: "#94a39d" }}>This measures captured text, not whether the agent succeeded. A tool-only completion can have no response text.</div>}
+        {metric.metric === "response_empty" && <div className="text-xs mt-1" style={{ color: "#94a39d" }}>A reply with no answer text and no tool call. This is a capture pattern, not whether the agent succeeded.</div>}
       </div>
       {metric.alert && <span className="text-xs font-mono px-2 py-1" style={{ color: signalColor, background: textOnly ? "rgba(242,184,75,.1)" : regression ? "rgba(255,107,107,.1)" : "rgba(78,225,170,.1)", borderRadius: 2 }}>{textOnly ? "TEXT PATTERN CHANGED" : regression ? "REGRESSION" : "IMPROVEMENT"}</span>}
     </div>
@@ -247,6 +250,24 @@ export function MonitorComparisonMetrics({
   </div>;
 }
 
+export function RunComparisonPreview({ response, onOpenRun }) {
+  const { manifest, comparison } = response.snapshot;
+  const alerts = (comparison.metrics || []).filter((metric) => metric.alert).length;
+  const status = comparison.status === "insufficient"
+    ? "Insufficient evidence" : comparison.status.replaceAll("_", " ");
+  return <section className="border p-5" style={box} aria-label="Run outcome comparison">
+    <div className="text-xs font-mono" style={{ color: "#f2b84b" }}>RUN OUTCOMES · HISTORICAL STATISTICAL COMPARISON</div>
+    <div className="font-semibold mt-1">{alerts > 0 ? `${alerts} significant change${alerts === 1 ? "" : "s"} in recorded run outcomes` : status}</div>
+    <p className="text-sm mt-2" style={{ color: "#94a39d" }}>{manifest.reference_unit_ids.length} reference runs → {manifest.current_unit_ids.length} current runs. Each recorded outcome is tested with Fisher's exact test, corrected across outcomes and groups, and reported only above the minimum change. Runs count once they end, or after 30 minutes without new activity; a run that is still open holds back every run that started after it.</p>
+    <p className="text-xs mt-2" style={{ color: "#94a39d" }}>This comparison is not saved and cannot be activated as a monitor: a run's outcome can change while it is open. A run measures only what its source reported; runs with omitted events measure no tool or model-call outcome.</p>
+    {comparison.status === "insufficient" && <p className="text-sm mt-3" style={{ color: "#f2b84b" }}>No outcome had enough reported runs on both sides of the split. Lower the sample floors or choose wider date ranges.</p>}
+    <MonitorComparisonMetrics comparison={comparison}
+      referenceSummary={manifest.reference_summary}
+      currentSummary={manifest.current_summary}
+      onOpenTrace={onOpenRun} />
+  </section>;
+}
+
 function MonitorSnapshot({ response, evaluators, fallbackTarget, onOpenTrace }) {
   const snapshot = response.snapshot;
   const manifest = snapshot.manifest;
@@ -292,7 +313,7 @@ function MonitorSnapshot({ response, evaluators, fallbackTarget, onOpenTrace }) 
   </section>;
 }
 
-export function Monitor({ configUrl, evaluation = {}, initialState = null, view = "history", traceCount = 0, totalTraces = null, agentRunCount = 0, onChanged = null, onOpenTrace = null, onSetup = null, onPlan = null, onGroups = null }) {
+export function Monitor({ configUrl, evaluation = {}, initialState = null, view = "history", traceCount = 0, totalTraces = null, agentRunCount = 0, onChanged = null, onOpenTrace = null, onSetup = null, onPlan = null, onGroups = null, onOpenRun = null }) {
   const root = configUrl.replace(/\/api\/config$/, "");
   const evaluators = (evaluation.availableIdentities || []).filter(
     (identity, index, rows) => identity.complete && identity.fingerprint
@@ -302,6 +323,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
   const [active, setActive] = useState(initialState?.active || null);
   const [candidate, setCandidate] = useState(initialState?.candidate || null);
   const [descriptive, setDescriptive] = useState(null);
+  const [runComparison, setRunComparison] = useState(null);
   const [conversationDetail, setConversationDetail] = useState(null);
   const [agentEvaluators, setAgentEvaluators] = useState(initialState?.agentEvaluators || []);
   const [agentEvaluatorDiscoveryTruncated, setAgentEvaluatorDiscoveryTruncated] = useState(initialState?.agentEvaluatorDiscoveryTruncated || false);
@@ -361,6 +383,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
   const update = (name, value) => {
     setCandidate(null);
     setDescriptive(null);
+    setRunComparison(null);
     setConversationDetail(null);
     setForm((current) => ({
       ...current,
@@ -371,6 +394,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
   };
   const logicalSession = form.analysisUnit === "logical_session";
   const conversation = form.analysisUnit === "conversation";
+  const runUnit = form.analysisUnit === "run";
   const measurements = logicalSession ? agentEvaluators : evaluators;
   const requiresRebootstrap = active?.state === "requires_rebootstrap";
   const referenceReady = referenceReadyForActivation(candidate);
@@ -381,6 +405,8 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
     const result = await post("/api/monitor/preview", conversation ? conversationMonitorRequest(form) : monitorRequest(form));
     if (result) {
       setConversationDetail(null);
+      setRunComparison(result.state === "historical_run" ? result : null);
+      if (result.state === "historical_run") { setCandidate(null); setDescriptive(null); return; }
       if (result.state === "descriptive") { setDescriptive(result); setCandidate(null); }
       else { setCandidate(result); setDescriptive(null); }
       onChanged?.();
@@ -395,9 +421,9 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
     {view === "history" && <div className="verdict-drift-grid"><section className="border p-5" style={box}>
       <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>SUGGESTED FIRST CHECK</div>
       <h2 className="text-lg font-semibold mt-1">{traceCount > 0 ? "Verdict’s suggested comparison" : "Connect model-call evidence"}</h2>
-      {traceCount > 0 ? <div className="divide-y mt-4 text-sm" style={{ borderColor: "#26332e" }}><div className="py-3"><strong>Start with all eligible calls</strong><p style={{ color: "#94a39d" }}>Use a broad comparison before splitting traffic into smaller groups.</p></div><div className="py-3"><strong>Watch recorded model-call changes</strong><p style={{ color: "#94a39d" }}>Compare provider errors, blank captured response text, and refusal-like language.</p></div><div className="py-3"><strong>Freeze the reviewed reference</strong><p style={{ color: "#94a39d" }}>Activation starts a new prospective cohort; the historical preview does not become a live alert.</p></div></div>
+      {traceCount > 0 ? <div className="divide-y mt-4 text-sm" style={{ borderColor: "#26332e" }}><div className="py-3"><strong>Start with all eligible calls</strong><p style={{ color: "#94a39d" }}>Use a broad comparison before splitting traffic into smaller groups.</p></div><div className="py-3"><strong>Watch recorded model-call changes</strong><p style={{ color: "#94a39d" }}>Compare provider errors, blank replies, and refusal-like language.</p></div><div className="py-3"><strong>Freeze the reviewed reference</strong><p style={{ color: "#94a39d" }}>Activation starts a new prospective cohort; the historical preview does not become a live alert.</p></div></div>
         : <p className="text-sm mt-3" style={{ color: "#94a39d" }}>{agentRunCount > 0 ? `${agentRunCount.toLocaleString()} agent runs are available for local analysis. Add genuine completed provider calls before previewing a model-call alert.` : "Connect an instrumented source before previewing a model-call alert."}</p>}
-      {(traceCount > 0 || (logicalSession && agentRunCount > 0) || conversation) && <button type="button" disabled={!token || busy} onClick={previewComparison} className="border px-4 py-2 text-sm mt-4" style={{ borderColor: "#4ee1aa", color: "#4ee1aa" }}>{logicalSession || conversation ? "Preview descriptive comparison" : form.groupingMode === "none" ? "Preview all-call check" : "Preview selected call groups"}</button>}
+      {(traceCount > 0 || ((logicalSession || runUnit) && agentRunCount > 0) || conversation) && <button type="button" disabled={!token || busy} onClick={previewComparison} className="border px-4 py-2 text-sm mt-4" style={{ borderColor: "#4ee1aa", color: "#4ee1aa" }}>{runUnit ? "Compare run outcomes" : logicalSession || conversation ? "Preview descriptive comparison" : form.groupingMode === "none" ? "Preview all-call check" : "Preview selected call groups"}</button>}
       {traceCount === 0 && onSetup && <button type="button" onClick={onSetup} className="underline text-sm mt-4" style={{ color: "#4ee1aa" }}>Set up model-call capture</button>}
     </section><aside className="border p-5" style={box}>
       <h2 className="font-semibold">{candidate ? "Review this candidate" : active ? "Current policy" : "Before activation"}</h2>
@@ -433,6 +459,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
       </>}
       {draftApplied && <p role="status" className="text-sm mt-2" style={{ color: "#f2b84b" }}>{draftApplied === "cohort" ? "Cohort draft filled the local comparison form. Preview and review the actual eligible counts before activation." : "Setup draft applied to local form. Preview the comparison and review its cohorts before activation. Suggested interval is advisory; save a schedule separately."}</p>}
     </section>}
+    {runComparison && <RunComparisonPreview response={runComparison} onOpenRun={onOpenRun} />}
     {descriptive?.unit === "conversation" && <ConversationPreview preview={descriptive} onOpen={openConversation} />}
     {descriptive && descriptive.unit !== "conversation" && <LogicalSessionPreview preview={descriptive} />}
     {conversationDetail && <section className="border p-5 space-y-2" style={box}>
@@ -466,17 +493,18 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
       <div className="grid sm:grid-cols-2 gap-4 mt-5">
         {!conversation && <label className="text-sm">Window mode<select value={form.windowMode} onChange={(event) => update("windowMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="count">Count cohorts</option><option value="explicit">Explicit date ranges</option></select></label>}
         {form.windowMode === "count" && <label className="text-sm">Reference share<input type="number" min="0.5" max="0.95" step="0.05" value={form.referenceRatio} onChange={(event) => update("referenceRatio", Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>}
-        <label className="text-sm">Analysis unit<select value={form.analysisUnit} onChange={(event) => update("analysisUnit", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="trace">Genuine model call</option><option value="logical_session">Logical session (descriptive)</option><option value="conversation">Conversation grade (descriptive)</option></select></label>
+        <label className="text-sm">Analysis unit<select value={form.analysisUnit} onChange={(event) => update("analysisUnit", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="trace">Genuine model call</option><option value="run">Agent run outcomes (historical, statistical)</option><option value="logical_session">Logical session (descriptive)</option><option value="conversation">Conversation grade (descriptive)</option></select></label>
         {conversation ? <>
           <label className="text-sm">Evaluator fingerprint<input value={form.evaluatorFingerprint} onChange={(event) => update("evaluatorFingerprint", event.target.value)} placeholder="64-character fingerprint from Evaluator Lab" className="block w-full mt-1 border p-2 bg-transparent" /></label>
           <label className="text-sm">Binary rubric dimension<input value={form.dimension} onChange={(event) => update("dimension", event.target.value)} placeholder="e.g. quality" className="block w-full mt-1 border p-2 bg-transparent" /></label>
           <label className="text-sm">Source label key (optional)<input value={form.labelKey} onChange={(event) => update("labelKey", event.target.value)} placeholder="e.g. group" className="block w-full mt-1 border p-2 bg-transparent" /></label>
         </> : <>
-          <label className="text-sm">Measurement<select value={form.evaluatorFingerprint} onChange={(event) => update("evaluatorFingerprint", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="">{logicalSession ? "Deterministic agent checks only" : "Deterministic trace checks only"}</option>{measurements.map((identity) => <option key={identity.fingerprint} value={identity.fingerprint}>{identity.label}</option>)}</select><span className="block text-xs mt-1" style={{ color: "#94a39d" }}>{form.evaluatorFingerprint ? "Compares existing stored judgments; this preview makes no judge calls." : logicalSession ? "Compares completed execution and final-output presence by logical session." : "Compares provider errors, blank captured response text, and refusal-like language."}</span>{logicalSession && <AgentEvaluatorDiscoveryNote truncated={agentEvaluatorDiscoveryTruncated} />}</label>
-          <label className="text-sm">Comparison facet<select disabled={logicalSession} value={form.groupingMode} onChange={(event) => update("groupingMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="none">{logicalSession ? "No grouping for logical sessions" : "All eligible calls (recommended)"}</option>{!logicalSession && <><option value="provider_model">Provider and model</option><option value="cluster">Active reviewed cluster</option></>}</select></label>
+          {runUnit ? <div className="text-sm">Measurement<p className="mt-1 text-xs" style={{ color: "#94a39d" }}>Recorded run outcomes: failed or timed-out runs, runs with a failed tool result, and runs with a failed model call. No judge is used.</p></div> : <label className="text-sm">Measurement<select value={form.evaluatorFingerprint} onChange={(event) => update("evaluatorFingerprint", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="">{logicalSession ? "Deterministic agent checks only" : "Deterministic trace checks only"}</option>{measurements.map((identity) => <option key={identity.fingerprint} value={identity.fingerprint}>{identity.label}</option>)}</select><span className="block text-xs mt-1" style={{ color: "#94a39d" }}>{form.evaluatorFingerprint ? "Compares existing stored judgments; this preview makes no judge calls." : logicalSession ? "Compares completed execution and final-output presence by logical session." : "Compares provider errors, blank replies, and refusal-like language."}</span>{logicalSession && <AgentEvaluatorDiscoveryNote truncated={agentEvaluatorDiscoveryTruncated} />}</label>}
+          <label className="text-sm">Comparison facet<select disabled={logicalSession} value={form.groupingMode} onChange={(event) => update("groupingMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="none">{logicalSession ? "No grouping for logical sessions" : runUnit ? "All recorded runs" : "All eligible calls (recommended)"}</option>{runUnit ? <option value="agent">Agent name</option> : !logicalSession && <><option value="provider_model">Provider and model</option><option value="cluster">Active reviewed cluster</option></>}</select></label>
         </>}
         {form.windowMode === "explicit" && ["referenceStart", "referenceEnd", "currentStart", "currentEnd"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="datetime-local" value={form[name]} onChange={(event) => update(name, event.target.value)} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
-        {!logicalSession && !conversation && ["minimumReference", "minimumCurrent", "prospectiveTarget"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="number" min="1" value={form[name]} onChange={(event) => update(name, Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
+        {!logicalSession && !conversation && <label className="text-sm">Minimum change (percentage points)<input type="number" min="0" max="100" step="0.5" value={Math.round(form.minimumEffect * 1000) / 10} onChange={(event) => update("minimumEffect", Number(event.target.value) / 100)} className="block w-full mt-1 border p-2 bg-transparent" /><span className="block text-xs mt-1" style={{ color: "#94a39d" }}>A significant change smaller than this is shown but does not alert. Rare signals such as refusals often move by only 1–2 points.</span></label>}
+        {!logicalSession && !conversation && (runUnit ? ["minimumReference", "minimumCurrent"] : ["minimumReference", "minimumCurrent", "prospectiveTarget"]).map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="number" min="1" value={form[name]} onChange={(event) => update(name, Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
       </div>
       <div className="flex flex-wrap gap-2 mt-5">
         <button disabled={!token || busy} onClick={previewComparison} className="border px-4 py-2 text-sm">{conversation ? "Run historical comparison" : "Preview comparison"}</button>

@@ -66,11 +66,17 @@ def outcome_reported(event: AgentEvent) -> bool:
     This mirrors the failure predicates below: a zero failure count only means
     "no failures" when at least one event of that type reported an outcome.
     """
-    if event.status in {
-        ExecutionStatus.COMPLETED, ExecutionStatus.FAILED, ExecutionStatus.TIMED_OUT,
+    return outcome_reported_values(event.status.value, event.attributes)
+
+
+def outcome_reported_values(status: str, attributes: dict) -> bool:
+    """``outcome_reported`` over stored status and attribute values."""
+    if status in {
+        ExecutionStatus.COMPLETED.value,
+        ExecutionStatus.FAILED.value,
+        ExecutionStatus.TIMED_OUT.value,
     }:
         return True
-    attributes = event.attributes
     return (
         isinstance(attributes.get("is_error"), bool)
         or type(attributes.get("exit_code")) is int

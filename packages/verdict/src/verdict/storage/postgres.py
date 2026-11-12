@@ -120,6 +120,7 @@ from verdict.redaction import (
     sanitize_span,
     sanitize_trace,
 )
+from verdict.run_monitoring import RunMonitorFacts
 from verdict.schema import (
     ActiveClusterRegistry,
     ClusterIdentity,
@@ -163,6 +164,7 @@ from verdict.storage.base import (
     _validate_drift_run_snapshot,
     _validate_evaluator_judgment_query,
 )
+from verdict.storage.run_monitor_facts import read_run_monitor_facts
 from verdict.storage.turn_tool_evidence import (
     read_turn_tool_counts,
     read_turn_tool_counts_batch,
@@ -2349,6 +2351,12 @@ class PostgresStorage:
         run_ids = tuple(row[0] for row in rows)
         with self._pool.connection() as conn:
             return self._read_normalized_bundles_connection(conn, tenant_id, run_ids)
+
+    def load_run_monitor_facts(self, tenant_id: str) -> list[RunMonitorFacts]:
+        _validate_agent_bundle_query(tenant_id, 1)
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            return read_run_monitor_facts(conn, postgres=True, tenant_id=tenant_id)
 
     def load_logical_session_monitor_evidence(
         self,

@@ -72,6 +72,7 @@ from verdict.analysis_records import (
 from verdict.evidence import AgentCaptureBatch, AgentRunBundle
 from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy
 from verdict.normalized_evidence import _LegacyLocalTextUpgrade
+from verdict.run_monitoring import RunMonitorFacts
 from verdict.schema import (
     DriftRun,
     DriftSignal,
@@ -511,6 +512,9 @@ class BufferedStorage:
             tenant_id,
             limit=limit,
         )
+
+    def load_run_monitor_facts(self, tenant_id: str) -> list[RunMonitorFacts]:
+        return self._read(self._inner.load_run_monitor_facts, tenant_id)
 
     def load_logical_session_monitor_evidence(
         self,

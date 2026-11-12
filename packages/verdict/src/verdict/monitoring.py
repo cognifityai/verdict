@@ -183,7 +183,7 @@ class MonitorPolicy:
                 raise ValueError(f"{name} must be between zero and one")
         if self.analysis_unit not in {"trace", "turn", "run", "session"}:
             raise ValueError("analysis_unit is unsupported")
-        if self.grouping_mode not in {"none", "provider_model", "cluster"}:
+        if self.grouping_mode not in {"none", "provider_model", "cluster", "agent"}:
             raise ValueError("grouping_mode is unsupported")
         if self.cluster_registry_version_id is not None:
             version_id = self.cluster_registry_version_id
@@ -261,9 +261,24 @@ class MonitorPolicy:
 
 
 def validate_monitor_analysis_unit(policy: MonitorPolicy) -> None:
-    """Reject new execution or persistence for unsupported monitor units."""
-    if policy.analysis_unit != "trace":
+    """Reject persistence or prospective execution for unsupported monitor units."""
+    if policy.analysis_unit != "trace" or policy.grouping_mode == "agent":
         raise ValueError("Monitor currently supports only the trace analysis unit.")
+
+
+def validate_historical_analysis_unit(policy: MonitorPolicy) -> None:
+    """Allow a one-off historical comparison of model calls or Agent Runs.
+
+    Run outcomes can still change while a run is open, so run comparisons are
+    historical only and are never saved as a policy or advanced prospectively.
+    """
+    if policy.analysis_unit == "run":
+        if policy.grouping_mode not in {"none", "agent"}:
+            raise ValueError("run comparisons support no grouping or agent grouping")
+        if policy.evaluator_fingerprint is not None:
+            raise ValueError("run comparisons use recorded outcomes only")
+        return
+    validate_monitor_analysis_unit(policy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -996,7 +1011,7 @@ def _manifest(
 
 def plan_historical_manifest(units, policy: MonitorPolicy, *, cutoff: datetime) -> CohortManifest:
     """Choose historical membership first, then freeze its normalized facts."""
-    validate_monitor_analysis_unit(policy)
+    validate_historical_analysis_unit(policy)
     _aware(cutoff, "cutoff")
     rows = [unit for unit in _ordered(units) if unit.event_time <= cutoff]
     if policy.window_mode is WindowMode.COUNT:
@@ -1163,7 +1178,7 @@ def plan_prospective_manifest(
 
 def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> MonitorComparison:
     """Compare immutable cohort summaries; never reload approved outcomes."""
-    validate_monitor_analysis_unit(policy)
+    validate_historical_analysis_unit(policy)
     if manifest.policy_fingerprint != policy.fingerprint:
         raise ValueError("manifest and policy do not match")
     if manifest.reference_summary is None or manifest.current_summary is None:
