@@ -22,6 +22,7 @@ from verdict.monitor_inputs import (
     select_monitor_evaluator,
 )
 from verdict.monitoring import (
+    METRIC_CONTRACT_VERSION,
     MonitorEvaluatorPending,
     MonitorPolicy,
     MonitorRebootstrapRequired,
@@ -297,13 +298,27 @@ class MonitorRoutes:
             )
         if state == "requires_rebootstrap":
             result["rebootstrapRequired"] = True
-            result["rebootstrapReason"] = (
-                "This monitor uses an unsupported analysis unit. Preview and "
-                "activate a trace-based replacement before running it again."
-                if policy.analysis_unit != "trace"
-                else "This monitor predates immutable cohort evidence. Preview and "
-                "activate a replacement before running it again."
-            )
+            if policy.analysis_unit != "trace":
+                reason = (
+                    "This monitor uses an unsupported analysis unit. Preview and "
+                    "activate a trace-based replacement before running it again."
+                )
+            elif (
+                manifest is not None
+                and manifest.reference_summary is not None
+                and manifest.metric_contract_version != METRIC_CONTRACT_VERSION
+            ):
+                reason = (
+                    "This monitor's reference was measured with an earlier definition "
+                    "of its checks. Preview and activate a replacement so both cohorts "
+                    "use the same definition."
+                )
+            else:
+                reason = (
+                    "This monitor predates immutable cohort evidence. Preview and "
+                    "activate a replacement before running it again."
+                )
+            result["rebootstrapReason"] = reason
         return result
 
     def bounded_units(self, writable, policy):
