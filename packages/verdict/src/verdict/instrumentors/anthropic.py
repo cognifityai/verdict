@@ -26,6 +26,7 @@ from verdict.instrumentors.base import (
     decide_persist,
     is_verdict_wrapt_wrapper,
     normalize_finish_reason,
+    record_response_tool_calls,
     should_sample_trace,
 )
 from verdict.pricing import compute_cost_usd
@@ -420,8 +421,11 @@ class AnthropicInstrumentor(BaseInstrumentor):
                 trace.input_tokens,
                 trace.output_tokens,
             )
+            blocks = getattr(resp, "content", None) or []
+            record_response_tool_calls(
+                trace, sum(_is_tool_use_block(block) for block in blocks),
+            )
             if self.client.capture_content:
-                blocks = getattr(resp, "content", None) or []
                 text = _flatten_content(blocks)
                 trace.response_redacted = redact(
                     text,
@@ -589,6 +593,7 @@ class _StreamingWrapper:
         self._instr = instr
         self._finalize_on_iteration = finalize_on_iteration
         self._text_chunks: list[str] = []
+        self._tool_use_blocks = 0
         self._input_tokens: int | None = None
         self._output_tokens: int | None = None
         self._stop_reason: str | None = None
@@ -670,6 +675,10 @@ class _StreamingWrapper:
                     txt = getattr(delta, "text", None)
                     if txt and self._instr.client.capture_content:
                         self._text_chunks.append(txt)
+            elif etype == "content_block_start":
+                self._tool_use_blocks += _is_tool_use_block(
+                    getattr(event, "content_block", None)
+                )
             elif etype == "message_start":
                 msg = getattr(event, "message", None)
                 if msg is not None:
@@ -732,6 +741,7 @@ class _StreamingWrapper:
                 self._trace.output_tokens = self._output_tokens
             if self._stop_reason is not None:
                 self._trace.finish_reason = self._stop_reason
+            record_response_tool_calls(self._trace, self._tool_use_blocks)
             self._trace.tags = {
                 **self._trace.tags,
                 "verdict.stream_completion": ("complete" if self._saw_message_stop else "partial"),
@@ -893,6 +903,12 @@ class _AsyncMessageStreamingWrapper(_AsyncStreamingWrapper):
     async def get_final_text(self) -> str:
         await self.until_done()
         return await self._inner.get_final_text()
+
+
+def _is_tool_use_block(block: Any) -> bool:
+    """A client tool call; ``server_tool_use`` and MCP blocks run inside the provider."""
+    kind = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+    return kind == "tool_use"
 
 
 def _flatten_content(content: Any) -> str:

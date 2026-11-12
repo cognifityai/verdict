@@ -366,6 +366,27 @@ def _provider_response_id(value: object) -> str | None:
         return None
 
 
+def _claude_api_error(row: dict[str, object]) -> str | None:
+    """Return the provider error for a Claude Code API-error row, if any.
+
+    Claude Code records a failed provider request as an assistant row with
+    ``isApiErrorMessage: true``. Its text is a client notice, not model output,
+    so classification reads only the structured code and HTTP status.
+    """
+    if row.get("isApiErrorMessage") is not True:
+        return None
+    code = row.get("error")
+    code = (
+        _bounded_utf8(code, 128)
+        if isinstance(code, str) and code and "\x00" not in code
+        else "api_error"
+    )
+    status = row.get("apiErrorStatus")
+    if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+        return code
+    return f"{code} (HTTP {status})"
+
+
 def _record_codex_usage(
     turn: _RawTurn,
     info: object,
@@ -1276,6 +1297,7 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
         model_event = model_events.get(message_id) if message_id is not None else None
         if message_id is not None and model_event is None:
             usage = _record_claude_usage(active, message_id, message.get("usage")) or {}
+            api_error = _claude_api_error(row)
             _event(
                 active,
                 occurred_at,
@@ -1289,8 +1311,12 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
                     "finish_reason": message.get("stop_reason") or "",
                     "input_tokens": usage.get("input_tokens"),
                     "output_tokens": usage.get("output_tokens"),
+                    **({"error": api_error} if api_error is not None else {}),
                 },
-                status=ExecutionStatus.COMPLETED,
+                status=(
+                    ExecutionStatus.FAILED if api_error is not None
+                    else ExecutionStatus.COMPLETED
+                ),
                 provider_response_id=message_id,
                 response_text=response_text.value,
                 legacy_response_text=response_text.legacy_value,
@@ -1874,6 +1900,7 @@ def _linked_traces(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             finish_reason=str(attributes.get("finish_reason") or "") or None,
+            error=str(attributes.get("error") or "") or None,
             prompt_redacted=request,
             response_redacted=response,
             raw_messages=messages or None,

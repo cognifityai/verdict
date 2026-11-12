@@ -640,6 +640,25 @@ def merge_agent_turn(
     )
 
 
+def _reclassifies_provider_error(current: AgentEvent, incoming: AgentEvent) -> bool:
+    """Whether a model call first stored as completed now carries its provider error.
+
+    Releases before structured provider-error import stored failed provider
+    requests as completed model calls. The source record is unchanged; only its
+    classification is newer. The transition is one-way and requires the
+    incoming record to add the provider error the stored record lacks.
+    """
+    return (
+        current.event_type is AgentEventType.MODEL_CALL
+        and current.provenance == "claude:assistant_message"
+        and current.status is ExecutionStatus.COMPLETED
+        and incoming.status is ExecutionStatus.FAILED
+        and current.attributes.get("error") in (None, "")
+        and isinstance(incoming.attributes.get("error"), str)
+        and bool(incoming.attributes["error"])
+    )
+
+
 def merge_agent_event(current: AgentEvent | None, incoming: AgentEvent) -> AgentEvent:
     if current is None:
         return incoming
@@ -698,7 +717,11 @@ def merge_agent_event(current: AgentEvent | None, incoming: AgentEvent) -> Agent
         sequence=current.sequence,
         occurred_at=current.occurred_at,
         event_type=current.event_type,
-        status=_advance_status(current.status, incoming.status, subject="event"),
+        status=(
+            incoming.status
+            if _reclassifies_provider_error(current, incoming)
+            else _advance_status(current.status, incoming.status, subject="event")
+        ),
         provenance=current.provenance,
         attributes=attributes,
         privacy_classification=privacy,

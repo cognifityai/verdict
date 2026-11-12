@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from verdict.redaction import sanitize_error_text, sanitize_trace
 from verdict.schema import Trace
+from verdict.trace_facts import RESPONSE_TOOL_CALLS_TAG
 
 if TYPE_CHECKING:
     from verdict.client import VerdictClient
@@ -215,6 +216,16 @@ def normalize_finish_reason(raw: object) -> str | None:
     if not text:
         return None
     return text.lower()
+
+
+def record_response_tool_calls(trace: Trace, count: int) -> None:
+    """Record how many client tool calls a completed provider response contained.
+
+    Zero is recorded too: it is what lets an empty reply count as blank rather
+    than as a call captured before this fact existed. The count is metadata, so
+    it is kept even when content capture is off.
+    """
+    trace.tags = {**trace.tags, RESPONSE_TOOL_CALLS_TAG: str(max(count, 0))}
 
 
 def decide_persist(raised: bool, should_sample: bool) -> tuple[bool, bool]:

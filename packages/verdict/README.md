@@ -57,7 +57,11 @@ with verdict.agent_run(name="support-agent", session_id="session-123") as run:
 Supported Anthropic, OpenAI, and Google SDK calls inside the turn create
 genuine linked model-call traces. Verdict captures provider-reported usage,
 finish reason, and errors where the provider supplies them, and measures call
-latency around the SDK call. The
+latency around the SDK call. A completed call records how many tool calls the
+response asked the application to run, including zero, in the
+`verdict.response_tool_calls` tag; captured response text holds only answer
+text. Tools that run inside the provider, such as hosted web or file search,
+are not counted. The
 application supplies its own run, tool, test, feedback, and outcome records;
 Verdict does not infer task success from a model answer. SDK content capture is
 bounded and on by default; use `verdict.init(capture_content=False)` when the

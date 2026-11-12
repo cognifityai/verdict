@@ -32,6 +32,7 @@ from verdict.instrumentors.base import (
     decide_persist,
     is_verdict_wrapt_wrapper,
     normalize_finish_reason,
+    record_response_tool_calls,
     should_sample_trace,
 )
 from verdict.pricing import compute_cost_usd
@@ -411,10 +412,11 @@ class GoogleInstrumentor(BaseInstrumentor):
                 trace.finish_reason = normalize_finish_reason(
                     getattr(candidates[0], "finish_reason", None)
                 )
+                record_response_tool_calls(trace, _genai_function_call_count(candidates[0]))
             if self.client.capture_content:
                 text = getattr(resp, "text", "") or ""
                 if not text and candidates:
-                    text = _flatten_genai_contents(candidates[0])
+                    text = _genai_candidate_text(candidates[0])
                 trace.response_redacted = redact(
                     text,
                     mode=self.client.redaction_mode,  # type: ignore[arg-type]
@@ -448,6 +450,7 @@ class _StreamingWrapper:
         self._t0 = t0
         self._instr = instr
         self._text_chunks: list[str] = []
+        self._function_calls = 0
         self._usage: Any = None
         self._finish_reason: str | None = None
         self._finalized = False
@@ -513,10 +516,11 @@ class _StreamingWrapper:
                 fr = getattr(candidates[0], "finish_reason", None)
                 if fr:
                     self._finish_reason = normalize_finish_reason(fr)
+                self._function_calls += _genai_function_call_count(candidates[0])
             if self._instr.client.capture_content:
                 txt = getattr(chunk, "text", None)
                 if not txt and candidates:
-                    txt = _flatten_genai_contents(candidates[0])
+                    txt = _genai_candidate_text(candidates[0])
                 if txt:
                     self._text_chunks.append(txt)
         except Exception:
@@ -550,6 +554,7 @@ class _StreamingWrapper:
                     self._trace.output_tokens = out_tok
             if self._finish_reason is not None:
                 self._trace.finish_reason = self._finish_reason
+            record_response_tool_calls(self._trace, self._function_calls)
             self._trace.cost_usd = compute_cost_usd(
                 self._trace.response_model or self._trace.request_model,
                 self._trace.input_tokens,
@@ -734,6 +739,27 @@ def _genai_contents_to_messages(
         return messages
     messages.append(_google_content_message(contents, default_role="user"))
     return messages
+
+
+def _genai_candidate_parts(candidate: Any) -> list[Any]:
+    return list(getattr(getattr(candidate, "content", None), "parts", None) or [])
+
+
+def _genai_candidate_text(candidate: Any) -> str:
+    """Answer text of one candidate; tool calls and thoughts are not text."""
+    return "\n".join(
+        text
+        for part in _genai_candidate_parts(candidate)
+        if getattr(part, "thought", None) is not True
+        and isinstance(text := getattr(part, "text", None), str) and text
+    )
+
+
+def _genai_function_call_count(candidate: Any) -> int:
+    return sum(
+        getattr(part, "function_call", None) is not None
+        for part in _genai_candidate_parts(candidate)
+    )
 
 
 def _flatten_genai_contents(contents: Any) -> str:
