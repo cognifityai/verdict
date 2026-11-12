@@ -1700,7 +1700,13 @@ def test_preview_execution_prompt_and_storage_share_the_effective_rubric():
             },
         },
     )
-    provider = CountingProvider()
+    class RelevanceProvider(CountingProvider):
+        def complete(self, request):
+            super().complete(request)
+            return CompletionResponse(text='{"relevance":{"reasoning":"direct","verdict":"PASS"}}',
+                                      input_tokens=10, output_tokens=8)
+
+    provider = RelevanceProvider()
     result = execute_evaluation(
         storage,
         tenant_id="local",

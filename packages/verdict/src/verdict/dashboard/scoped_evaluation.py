@@ -10,12 +10,13 @@ import os
 import re
 import secrets
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from verdict.dashboard.control_plane import ControlStore
+from verdict.dashboard.control_plane import ControlStore, _safe_json
 from verdict.dashboard.evaluator_lab import (
     _destination,
     _IdentityOnlyProvider,
@@ -26,6 +27,7 @@ from verdict.dashboard.evaluator_lab import (
     _uses_public_list_price,
     _validated_config,
 )
+from verdict.dashboard.scoped_evidence import paired_evidence, suitability
 from verdict.dashboard.setup_routes import SetupRoutes
 from verdict.dashboard.spend_limit import within_static_spend_limit
 from verdict.dashboard.storage_url import is_postgres_storage
@@ -42,7 +44,7 @@ from verdict.storage.sqlite import sqlite_path
 _MAX_TURNS = 20
 _MAX_EVENTS = 80
 _MAX_EVIDENCE_CHARS = 8_000
-_PROMPT_VERSION = "ordered-agent-evidence-v3"
+_PROMPT_VERSION = "ordered-agent-evidence-v4"
 _FOLLOWUP_TEXT_RUBRIC = {
     "name": "followup_text_review", "version": "1", "dimensions": [{
         "name": "correction",
@@ -141,6 +143,13 @@ def _session_projection(storage_url: str, tenant: str, config: dict[str, Any]) -
 def session_projection_from_report(
     report: dict[str, Any], *, session_id: str, source_kind: str,
 ) -> dict[str, Any]:
+    evidence = _session_coverage(report, session_id=session_id, source_kind=source_kind)
+    paired = paired_evidence(report["turns"], report["events"],
+                             source_kind=source_kind, session_id=session_id)
+    return _attach_pairs(evidence, paired, {"request", "response"})
+
+
+def _session_coverage(report: dict[str, Any], *, session_id: str, source_kind: str) -> dict:
     """Use the same evidence and size checks for the session view and preview."""
     reason = report["unavailableReason"]
     turns, events = report["turns"], report["events"]
@@ -201,7 +210,7 @@ def session_projection_from_report(
     return _finish_evidence(evidence)
 
 
-def _projection(storage, tenant: str, config: dict[str, Any],
+def _raw_projection(storage, tenant: str, config: dict[str, Any],
                 storage_url: str | None = None, *, bundle=None,
                 local_revision=None) -> dict[str, Any]:
     scope = config.get("scope")
@@ -434,8 +443,92 @@ def _projection(storage, tenant: str, config: dict[str, Any],
     return _finish_evidence(evidence)
 
 
+def _attach_pairs(evidence: dict, paired: dict, required: set[str]) -> dict:
+    evidence.pop("evidenceFingerprint", None)
+    if evidence["unavailableReason"] == "event_order_uncertain":
+        paired["chronologyCertain"] = False
+    evidence.update(paired)
+    evidence["suitability"] = suitability(paired, required)
+    return _finish_evidence(evidence)
+
+
+def _projection(storage, tenant: str, config: dict[str, Any],
+                storage_url: str | None = None, *, bundle=None, local_revision=None) -> dict:
+    if config.get("scope") == "session":
+        evidence = _session_projection(storage_url, tenant, config)
+    else:
+        if bundle is None:
+            snapshot = getattr(storage, "get_agent_capture_snapshot", None)
+            if callable(snapshot):
+                bundle, local_revision = snapshot(tenant, config.get("runId"))
+            else:
+                bundle = storage.get_agent_run_bundle(tenant, config.get("runId"))
+        evidence = _raw_projection(storage, tenant, config, storage_url,
+                                   bundle=bundle, local_revision=local_revision)
+        turns = sorted(bundle.turns, key=lambda turn: (turn.sequence, turn.turn_id))
+        if config["scope"] in {"turn_window", "followup_text"}:
+            index = next(i for i, turn in enumerate(turns) if turn.turn_id == config["turnId"])
+            turns = turns[index - 1:index + 1]
+        elif config["scope"] == "tool_action":
+            selected = next(event for event in bundle.events if event.event_id == config["eventId"])
+            turns = [turn for turn in turns if turn.turn_id == selected.turn_id]
+        selected_ids = {turn.turn_id for turn in turns}
+        selected_events = [event for event in bundle.events if event.turn_id in selected_ids]
+        if len(turns) > _MAX_TURNS or len(selected_events) > _MAX_EVENTS:
+            return _attach_pairs(evidence, {"turnPairs": [], "documents": {}, "chronologyCertain": False},
+                                 {"request", "response"})
+        turn_rows = [{"runId": turn.run_id, "turnId": turn.turn_id, "sequence": turn.sequence,
+                      "startedAt": turn.started_at.isoformat(),
+                      "endedAt": turn.ended_at.isoformat() if turn.ended_at else None,
+                      "request": turn.user_request_redacted, "response": turn.final_response_redacted,
+                      "requestState": turn.request_state.value, "responseState": turn.response_state.value,
+                      "requestTruncated": turn.request_truncated, "responseTruncated": turn.response_truncated}
+                     for turn in turns]
+        event_rows = [{"runId": bundle.run.run_id, "turnId": event.turn_id,
+                       "eventId": event.event_id, "occurredAt": event.occurred_at.isoformat(),
+                       "type": event.event_type.value, "attributes": disclosed_event_attributes(event.attributes),
+                       "provenance": event.provenance}
+                      for event in selected_events]
+        paired = paired_evidence(turn_rows, event_rows, source_kind=bundle.session.source_kind,
+                                 session_id=bundle.session.source_session_id)
+        if config["scope"] == "followup_text":
+            # This mode deliberately reviews no later response or typed events.
+            # Preserve that narrow egress contract in the additional disclosure.
+            for pair in paired["turnPairs"]:
+                pair["sourceReferences"] = []
+                pair["captureProvenance"] = []
+                pair["originalEvidenceReferences"] = []
+                pair["laterEvidenceReferences"] = []
+                pair["unplacedEvidenceReferences"] = []
+            paired["turnPairs"][-1]["response"] = None
+            paired["documents"] = {}
+        required = {"request"} if config["scope"] in {"tool_action", "followup_text"} else {"request", "response"}
+        evidence = _attach_pairs(evidence, paired, required)
+    required = {"request", "response"}
+    if config.get("evaluationMode") == "historical_audit":
+        # Canonical stored policies suffice for key-free freshness reads. The
+        # optional evaluator validates them at preview, before any judge call.
+        for dimension in config["rubric"]["dimensions"]:
+            required.update(dimension["requiredEvidence"])
+    elif any(d.get("requiresContext") is True for d in config.get("rubric", {}).get("dimensions", [])):
+        required.add("sources")
+    else:
+        return evidence
+    return _attach_pairs(evidence, {key: evidence[key] for key in (
+        "turnPairs", "documents", "chronologyCertain",
+    )}, required)
+
+
 def _plan(storage, tenant: str, config: dict[str, Any],
           storage_url: str | None = None) -> tuple[dict[str, Any], Any]:
+    mode = config.get("evaluationMode", "original_response")
+    if mode not in {"original_response", "historical_audit"}:
+        raise ValueError("unsupported scoped evaluation mode")
+    audit = mode == "historical_audit"
+    if audit and config.get("scope") not in {"session", "run", "turn_window"}:
+        raise ValueError("historical audit requires session/run/turn-window evidence")
+    if audit:
+        config = {**config, "maxOutputTokens": config.get("maxOutputTokens", 4096)}
     if config.get("scope") == "followup_text":
         if config.get("rubric") is not None:
             raise ValueError("text-only follow-up review uses a fixed criterion")
@@ -445,25 +538,62 @@ def _plan(storage, tenant: str, config: dict[str, Any],
     })
     if max_calls != 1 or config.get("toolEvidence") is not None:
         raise ValueError("scoped evaluation supports one bounded call")
-    evidence = _projection(storage, tenant, config, storage_url)
-    identity = _judge(_IdentityOnlyProvider(provider), model, rubric, max_output).evaluator_identity(None)
+    policy = None
+    if audit:
+        from verdict_eval import historical_audit
+
+        if provider == "jev":
+            raise ValueError("historical audit requires a structured provider")
+        policy = historical_audit.policies(config)
+    selection = {key: config[key] for key in (
+        "scope", "runId", "turnId", "eventId", "sessionId", "sourceKind",
+    ) if key in config}
+    selection["evaluationMode"] = mode
+    selection["rubric"] = {"name": rubric.name, "version": rubric.version, "dimensions": [
+        {"name": d.name, "description": d.description, "requiresContext": d.requires_context,
+         **(policy[d.name] if policy else {})} for d in rubric.dimensions
+    ]}
+    # Caller extras and dynamic map keys never cross the control-store boundary.
+    _safe_json({"selection": selection})
+    evidence = _projection(storage, tenant, selection, storage_url)
+    identity = _judge(_IdentityOnlyProvider(provider), model, rubric, max_output,
+                      skip_context_dependent_when_missing=False).evaluator_identity(None)
+    audit_identity = None
+    if audit:
+        audit_identity = [historical_audit.VERSION, historical_audit.PROMPT_FINGERPRINT, policy]
     destination, destination_binding = _destination(provider, identity)
     identity_fp = hashlib.sha256(_canonical([
-        _PROMPT_VERSION, config["scope"], identity["evaluator_fingerprint"], destination_binding,
+        _PROMPT_VERSION, config["scope"], identity["evaluator_fingerprint"], destination_binding, audit_identity,
     ])).hexdigest()
     fingerprint = hashlib.sha256(_canonical([
         tenant, evidence["evidenceFingerprint"], identity_fp,
     ])).hexdigest()
-    eligible = evidence["coverage"] == "complete"
+    eligible = evidence["coverage"] == "complete" and evidence["suitability"]["state"] != "unavailable"
+    if (audit and evidence["unavailableReason"] in {"source_capture_partial", "event_order_uncertain"}
+            and evidence["suitability"]["state"] != "unavailable"):
+        eligible = True
+    reason = evidence["unavailableReason"]
+    if evidence["suitability"]["state"] == "unavailable" and reason is None:
+        reason = "required_evidence_unavailable"
+    if audit and not historical_audit.shape_available(evidence, policy, max_output):
+        eligible, reason = False, "audit_shape_limit"
+    elif audit and len(historical_audit.messages(evidence, rubric, policy)[1]["content"].encode()) > 8_000:
+        eligible, reason = False, "evidence_limit"
     input_estimate = math.ceil((len(evidence["query"]) + len(evidence["response"]) +
                                 sum(len(d.description) for d in rubric.dimensions)) / 4) + 400
+    if audit:
+        input_estimate = math.ceil(sum(len(m["content"].encode()) for m in
+                                       historical_audit.messages(evidence, rubric, policy)) / 4)
     output_max = _output_maximum(provider, model, max_output, 1) if eligible else 0
     preview = {
         "scope": config["scope"], "provider": provider, "model": model,
         "rubric": _rubric_summary(rubric, identity), "evaluatorFingerprint": identity_fp,
         "promptVersion": _PROMPT_VERSION, "planFingerprint": fingerprint,
         "plannedCalls": 1 if eligible else 0, "coverage": evidence["coverage"],
-        "unavailableReason": evidence["unavailableReason"],
+        "unavailableReason": reason, "evaluationMode": mode,
+        "suitability": evidence["suitability"], "requestedOutputTokens": max_output,
+        "auditPolicy": policy if audit else None,
+        "evidenceSelection": selection,
         "evidencePreview": evidence, "estimatedInputTokens": input_estimate if eligible else 0,
         "maximumOutputTokens": output_max,
         "estimatedMaximumCostUsd": compute_cost_usd(model, input_estimate, output_max)
@@ -474,6 +604,14 @@ def _plan(storage, tenant: str, config: dict[str, Any],
     preview["scheduledUpperStaticListPriceUsd"] = (
         preview["upperStaticListPriceUsd"] if provider in {"anthropic", "openai"} else None
     )
+    if preview["plannedCalls"] == 1:
+        try:
+            _persistable_result({**_result_metadata(preview, rubric), "status": "completed",
+                                 "error": "invalid_judge_output", "dimensions": []})
+        except ValueError:
+            preview.update(plannedCalls=0, unavailableReason="result_limit", maximumOutputTokens=0,
+                           estimatedInputTokens=0, estimatedMaximumCostUsd=None,
+                           upperStaticListPriceUsd=None, scheduledUpperStaticListPriceUsd=None)
     return preview, rubric
 
 
@@ -492,8 +630,57 @@ def _saved_result(store: ControlStore, tenant: str, plan_fingerprint: str) -> di
         result_id = hashlib.sha256(_canonical([tenant, plan_fingerprint, status])).hexdigest()
         history = store.history(tenant, "scoped_evaluation", result_id)
         if history:
-            return {"resultId": result_id, **history[0]["payload"]}
+            return {"resultId": result_id, **_result_view(history[0]["payload"])}
     return None
+
+
+def _result_view(payload: dict) -> dict:
+    """Keep response maps compatible while storage uses bounded typed lists."""
+    result = dict(payload)
+    if "criteria" in result:
+        result["criterionDescriptions"] = {item["name"]: item["description"] for item in result["criteria"]}
+    if "auditPolicies" in result:
+        result["auditPolicy"] = ({item["dimension"]: {key: value for key, value in item.items()
+                                                    if key != "dimension"}
+                                  for item in result["auditPolicies"]} or None)
+    return result
+
+
+def _persistable_result(payload: dict) -> dict:
+    # Serialization makes the bounded generated payload a JSON tree before
+    # redaction; borrowed policy lists must not become shared Python graphs.
+    safe = redact_structure(json.loads(_safe_json(payload)))
+    if not isinstance(safe, dict):
+        raise ValueError("scoped result redaction failed")
+    _safe_json(safe)
+    return safe
+
+
+def _result_metadata(preview: dict, rubric) -> dict:
+    """One durable envelope, checked before egress and reused for terminal results."""
+    evidence = preview["evidencePreview"]
+    return {
+        "scope": evidence["scope"], "runId": evidence["runId"],
+        "sessionId": evidence.get("sessionId"), "sourceKind": evidence.get("sourceKind"),
+        "runIds": evidence.get("runIds"),
+        **({"turnId": evidence["turnId"]}
+           if evidence["scope"] in {"turn_window", "followup_text"} else {}),
+        "eventId": evidence["eventId"], "coverage": evidence["coverage"],
+        "evidenceFingerprint": evidence["evidenceFingerprint"],
+        "evidenceReferences": evidence["evidenceReferences"],
+        "evaluatorFingerprint": preview["evaluatorFingerprint"],
+        "provider": preview["provider"], "model": preview["model"],
+        "rubric": preview["rubric"], "promptVersion": _PROMPT_VERSION,
+        "criteria": [{"name": d.name, "description": d.description} for d in rubric.dimensions],
+        "evaluationMode": preview["evaluationMode"],
+        "auditPolicies": [{"dimension": name, **definition}
+                          for name, definition in (preview["auditPolicy"] or {}).items()],
+        "outputAllowance": {"requested": preview["requestedOutputTokens"],
+                            "maximum": preview["maximumOutputTokens"]},
+        "suitability": preview["suitability"], "evidenceCurrent": False,
+        "evaluatedAt": "2000-01-01T00:00:00.000000+00:00",
+        "evidenceSelection": preview["evidenceSelection"],
+    }
 
 
 def execute_scoped(storage, *, storage_url: str, tenant: str, config: dict[str, Any],
@@ -523,17 +710,27 @@ def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
             raise ValueError("direct evaluation exceeds estimated-spend limit")
     provider_name = preview["provider"]
     judge = _judge(provider or _provider(provider_name), preview["model"], rubric,
-                   config.get("maxOutputTokens", 512))
+                   preview["requestedOutputTokens"], skip_context_dependent_when_missing=False)
     base_identity = judge.evaluator_identity(None)
     expected = _judge(_IdentityOnlyProvider(provider_name), preview["model"], rubric,
-                      config.get("maxOutputTokens", 512)).evaluator_identity(None)
+                      preview["requestedOutputTokens"], skip_context_dependent_when_missing=False).evaluator_identity(None)
     if base_identity["evaluator_fingerprint"] != expected["evaluator_fingerprint"]:
         raise ValueError("judge provider behavior changed after preview")
     evidence = preview["evidencePreview"]
+    audit_result = {}
     try:
-        scores = judge.score(query=evidence["query"], response=evidence["response"])
+        if preview["evaluationMode"] == "historical_audit":
+            from verdict_eval import historical_audit
+
+            audit_result = historical_audit.execute(
+                judge.provider, model=preview["model"], max_tokens=preview["requestedOutputTokens"],
+                evidence=evidence, rubric=rubric, policy=preview["auditPolicy"],
+            )
+            scores = []
+        else:
+            scores = judge.score(query=evidence["query"], response=evidence["response"])
         allowed_refs = set(evidence["evidenceReferences"])
-        dimensions = []
+        dimensions = audit_result.get("dimensions", [])
         for score in scores:
             references = [
                 (kind, identifier) for kind, identifier in _REF.findall(score.reasoning)
@@ -548,6 +745,7 @@ def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
                 "explanation": (redact_structure(score.reasoning) or "")[:2_000],
                 "evidenceReferences": cited,
                 "citationStatus": "linked" if cited else "uncited_opinion",
+                "supportStatus": "unverified",
             })
         status, error = "completed", None
     except Exception as exc:
@@ -561,36 +759,34 @@ def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
     if not still_current:
         status, error, dimensions = "error", "evidence_changed_during_evaluation", []
     result = {
-        "scope": evidence["scope"], "runId": evidence["runId"],
-        "sessionId": evidence.get("sessionId"),
-        "sourceKind": evidence.get("sourceKind"),
-        "runIds": evidence.get("runIds"),
-        **({"turnId": evidence["turnId"]}
-           if evidence["scope"] in {"turn_window", "followup_text"} else {}),
-        "eventId": evidence["eventId"], "coverage": evidence["coverage"],
-        "evidenceFingerprint": evidence["evidenceFingerprint"],
-        "evidenceReferences": evidence["evidenceReferences"],
-        "evaluatorFingerprint": preview["evaluatorFingerprint"],
-        "provider": provider_name, "model": preview["model"],
-        "rubric": preview["rubric"], "promptVersion": _PROMPT_VERSION,
-        "criterionDescriptions": {
-            dimension.name: dimension.description for dimension in rubric.dimensions
-            if dimension.name in preview["rubric"]["dimensions"]
-        },
+        **_result_metadata(preview, rubric),
         "status": status, "error": error, "dimensions": dimensions,
+        "evidenceCurrent": still_current,
+        "evaluatedAt": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        **({key: audit_result[key] for key in (
+            "turnAssessments", "historicalFindings", "holisticAssessments", "citationValidation",
+        )} if "turnAssessments" in audit_result else {}),
+        **({"turnPairs": evidence["turnPairs"]} if "turnAssessments" in audit_result else {}),
     }
-    safe = redact_structure(result)
-    if not isinstance(safe, dict):
-        raise ValueError("scoped result redaction failed")
+    try:
+        safe = _persistable_result(result)
+    except ValueError:
+        # Structurally valid provider output can exceed durable payload limits.
+        # Persist one terminal error using the preflighted metadata only.
+        status = "error"
+        safe = _persistable_result({**_result_metadata(preview, rubric),
+                                    "evidenceCurrent": still_current,
+                                    "evaluatedAt": result["evaluatedAt"],
+                                    "status": "error", "error": "invalid_judge_output", "dimensions": []})
     document_id = hashlib.sha256(_canonical([
         tenant, preview["planFingerprint"], status,
     ])).hexdigest()
     existing = store.history(tenant, "scoped_evaluation", document_id)
     if existing:
-        return {"resultId": document_id, **existing[0]["payload"]}
+        return {"resultId": document_id, **_result_view(existing[0]["payload"])}
     store.append(tenant, kind="scoped_evaluation", document_id=document_id,
                  state=status, payload=safe, expected_revision=None)
-    return {"resultId": document_id, **safe}
+    return {"resultId": document_id, **_result_view(safe)}
 
 
 def _upper_static_cost(preview: dict[str, Any], rubric) -> float | None:
@@ -600,6 +796,12 @@ def _upper_static_cost(preview: dict[str, Any], rubric) -> float | None:
     from verdict_eval.judge import SYSTEM_PROMPT, _user_prompt
 
     evidence = preview["evidencePreview"]
+    if preview.get("evaluationMode") == "historical_audit":
+        from verdict_eval.historical_audit import messages
+
+        request_messages = messages(evidence, rubric, preview["auditPolicy"])
+        input_bound = sum(len(message["content"].encode()) for message in request_messages) + 1_024
+        return compute_exact_list_price_usd(preview["model"], input_bound, preview["maximumOutputTokens"])
     prompt = _user_prompt(evidence["query"], evidence["response"], None, rubric)
     # A byte may become at most one text token in supported provider tokenizers;
     # the extra envelope allowance covers message framing and SDK metadata.
@@ -627,13 +829,10 @@ def schedule_scoped_once(storage, *, storage_url: str, tenant: str,
     upper_cost = _upper_static_cost(preview, rubric)
     if not within_static_spend_limit(upper_cost, max_estimated_usd):
         raise ValueError("scheduled evaluation exceeds estimated-spend limit")
-    stored_config = {key: config[key] for key in (
-        "scope", "provider", "model", "rubric",
-    ) if key in config}
-    for key in ("runId", "turnId", "eventId", "sessionId", "sourceKind"):
-        if key in config:
-            stored_config[key] = config[key]
-    stored_config["maxOutput"] = config.get("maxOutputTokens", 512)
+    stored_config = {**preview["evidenceSelection"], "provider": preview["provider"], "model": preview["model"]}
+    if stored_config["scope"] == "followup_text":
+        stored_config.pop("rubric")
+    stored_config["maxOutput"] = preview["requestedOutputTokens"]
     document_id = secrets.token_hex(16)
     payload = {
         "config": stored_config,
@@ -773,9 +972,9 @@ def run_scheduled_once(storage_url: str, *, tenant: str, provider=None) -> dict[
             if provider is None and not os.environ.get(key_name):
                 return {"jobId": job_id, "status": "waiting_provider"}
             try:
-                actual = _judge(adapter, preview["model"], rubric, config["maxOutputTokens"])
+                actual = _judge(adapter, preview["model"], rubric, config["maxOutputTokens"], skip_context_dependent_when_missing=False)
                 expected = _judge(_IdentityOnlyProvider(preview["provider"]),
-                                  preview["model"], rubric, config["maxOutputTokens"])
+                                  preview["model"], rubric, config["maxOutputTokens"], skip_context_dependent_when_missing=False)
                 if actual.evaluator_identity(None)["evaluator_fingerprint"] != expected.evaluator_identity(None)["evaluator_fingerprint"]:
                     raise ValueError("judge provider behavior changed after preview")
             except Exception as exc:
@@ -829,7 +1028,19 @@ def register_scoped_routes(app, setup: SetupRoutes) -> None:
             return JSONResponse({"error": "scoped result unavailable"}, status_code=404)
         if not history:
             return JSONResponse({"error": "scoped result unavailable"}, status_code=404)
-        return {"resultId": result_id, **history[0]["payload"]}
+        payload = history[0]["payload"]
+        evidence_status = "unknown"
+        if payload.get("evidenceSelection"):
+            storage = setup.writable_storage()
+            try:
+                current = _projection(storage, setup.tenant_id, payload["evidenceSelection"], setup.storage_url)
+                evidence_status = ("current" if current["evidenceFingerprint"] == payload["evidenceFingerprint"]
+                                   else "stale")
+            except (KeyError, ValueError, TypeError):
+                evidence_status = "stale"
+            finally:
+                storage.close()
+        return {"resultId": result_id, **_result_view(payload), "evidenceStatus": evidence_status}
 
     @app.get("/api/scoped/scheduled")
     def scheduled_list(request: Request):

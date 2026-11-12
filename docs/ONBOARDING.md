@@ -276,6 +276,12 @@ with the recorded pair and **Correction**, **Ordinary follow-up**, and **Unclear
 buttons. An exact link with `review=followup` does the same. For an ordinary
 Turn link, select **Review this follow-up locally** to open it. The optional
 **Review this turn and prior answer** control starts a separate AI evaluation.
+
+For a small session, run, or adjacent-turn selection, the scoped panel also offers
+an optional **Historical audit**. Choose historical, final-response, or holistic
+aggregation and the evidence authority explicitly, then review and approve its
+one-call preview. Original assessments and recovery findings remain separate.
+See [evidence suitability, audit bounds, and saved-result semantics](EVALUATION_RELIABILITY.md).
 The human label needs no provider key. Verdict saves the label with
 an evidence fingerprint and marks it stale if the pair changes. It is not an
 automatic issue count or a claim about the agent's cause of failure. The

@@ -98,6 +98,17 @@ async function loadUiModule() {
   return import(`data:text/javascript;base64,${encoded}#${Math.random()}`);
 }
 
+test("blocked suitability reports the missing content role without changing coverage", async () => {
+  const { EvidenceSuitability } = await import(`data:text/javascript;base64,${Buffer.from((await build({
+    entryPoints: [new URL("../ScopedEvaluate.jsx", import.meta.url).pathname], bundle: true,
+    format: "esm", platform: "node", write: false,
+  })).outputFiles[0].text).toString("base64")}`);
+  const tree = EvidenceSuitability({ suitability: { state: "unavailable",
+    missingRequiredEvidence: [{ field: "response", role: "summary" }], limitations: [] } });
+  assert.match(textOf(tree), /response: summary/);
+  assert.match(textOf(tree), /unavailable/);
+});
+
 test("Evaluator Lab starts with a neutral response-quality rubric name", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.EvaluatorLab, createHooks(), { configUrl: "/api/config" });
@@ -4625,7 +4636,7 @@ test("scoped evaluation requires an exact preview and new approval after criteri
   tree = render(ui.ScopedEvaluate, hooks, props);
   const runButton = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation"))[0];
   assert.equal(runButton().props.disabled, true);
-  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox" && node.props["aria-label"] !== "Historical audit")[0]
     .props.onChange({ target: { checked: true } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.equal(runButton().props.disabled, false);
@@ -4652,6 +4663,35 @@ test("scoped evaluation requires an exact preview and new approval after criteri
   assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation")).length, 0);
 });
 
+test("historical audit declares meaning and output budget before consent", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "run", runId: "synthetic-run" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Evaluate this run"))[0].props.onClick();
+  render(ui.ScopedEvaluate, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: true }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.props?.["aria-label"] === "Historical audit")[0].props.onChange({ target: { checked: true } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.props?.["aria-label"] === "Audit aggregation")[0].props.onChange({ target: { value: "final_response" } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const pending = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Preview bounded"))[0].props.onClick();
+  const sent = JSON.parse(requests[2].options.body);
+  assert.equal(sent.evaluationMode, "historical_audit");
+  assert.equal(sent.maxOutputTokens, 4096);
+  assert.equal(sent.rubric.dimensions[0].aggregation, "final_response");
+  assert.equal(sent.rubric.dimensions[0].evidenceAuthority, "recorded_sources");
+  assert.deepEqual(sent.rubric.dimensions[0].requiredEvidence, ["request", "response"]);
+  await resolveJson(requests[2], { plannedCalls: 0, unavailableReason: "audit_shape_limit", suitability: { state: "limited" } });
+  await pending;
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /four turn-by-dimension entries/);
+  assert.equal(requests.filter((item) => item.url === "/api/scoped/run").length, 0);
+});
+
 test("direct scoped approval sends the chosen static estimate limit", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -4676,7 +4716,7 @@ test("direct scoped approval sends the chosen static estimate limit", async () =
   tree = render(ui.ScopedEvaluate, hooks, props);
   const budget = () => findAll(tree, (node) => node.type === "input" && node.props.type === "number")[0];
   const run = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation"))[0];
-  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox" && node.props["aria-label"] !== "Historical audit")[0]
     .props.onChange({ target: { checked: true } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   budget().props.onChange({ target: { value: "0.005" } });
@@ -4956,7 +4996,7 @@ test("session behavior focus changes the reviewed rubric and invalidates old app
   await previewing;
   await resolveJson(requests[3], { jobs: [] });
   tree = render(ui.ScopedEvaluate, hooks, props);
-  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0].props.onChange({ target: { checked: true } });
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox" && node.props["aria-label"] !== "Historical audit")[0].props.onChange({ target: { checked: true } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation"))[0].props.disabled, false);
   findAll(tree, (node) => node.type === "select" && node.props["aria-label"] === "Review focus")[0].props.onChange({ target: { value: "correction" } });
@@ -4989,7 +5029,7 @@ test("one-time scheduled evaluation requires a visible budget and persistent con
   tree = render(ui.ScopedEvaluate, hooks, props);
   const queue = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Queue one evaluation"))[0];
   assert.equal(queue().props.disabled, true);
-  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[1]
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox" && node.props["aria-label"] !== "Historical audit")[1]
     .props.onChange({ target: { checked: true } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.equal(queue().props.disabled, false);
@@ -5006,7 +5046,7 @@ test("one-time scheduled evaluation requires a visible budget and persistent con
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.match(textOf(tree), /Scheduled approval:\s+cancelled/);
   assert.equal(queue().props.disabled, true, "requeue requires fresh consent");
-  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[1]
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox" && node.props["aria-label"] !== "Historical audit")[1]
     .props.onChange({ target: { checked: true } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   const requeuing = queue().props.onClick();

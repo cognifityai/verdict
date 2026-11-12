@@ -19,7 +19,7 @@ import json
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
-OUTPUT_CONTRACT_VERSION = "judge_output_v2"
+OUTPUT_CONTRACT_VERSION = "judge_output_v3"
 MAX_OUTPUT_BYTES = 64_000
 _MAX_CANDIDATE_STARTS = 64
 _TRUNCATED_FINISH_REASONS = frozenset({"LENGTH", "MAX_TOKENS"})
@@ -90,17 +90,22 @@ def _candidates(text: str) -> Iterator[object]:
     object of a value that contradicted itself.
     """
     starts = 0
-    for index, character in enumerate(text):
+    index = 0
+    while index < len(text):
+        character = text[index]
         if character not in "{[":
+            index += 1
             continue
         starts += 1
         if starts > _MAX_CANDIDATE_STARTS:
             raise JudgeOutputError("judge output has too many candidate values")
         try:
-            candidate, _ = _DECODER.raw_decode(text, index)
+            candidate, end = _DECODER.raw_decode(text, index)
         except json.JSONDecodeError:
+            index += 1
             continue
         yield candidate
+        index = end
 
 
 def _named_items(items: list) -> dict[str, object] | None:
@@ -148,17 +153,23 @@ def decode_judge_dimensions(
     if len(text.encode("utf-8")) > max_bytes:
         raise JudgeOutputUnusable("judge output exceeds size limit")
     expected_names = set(expected)
+    results = []
     for candidate in _candidates(text):
         if isinstance(candidate, dict):
             if "dimensions" in candidate:
-                return _by_name(candidate["dimensions"])
+                results.append(_by_name(candidate["dimensions"]))
+                continue
             named: dict[str, object] | None = candidate
         elif isinstance(candidate, list):
             named = _named_items(candidate)
         else:
             continue
         if named is not None and expected_names.intersection(named):
-            return named
+            results.append(named)
+    if len(results) > 1:
+        raise JudgeOutputError("multiple judge answers")
+    if results:
+        return results[0]
     raise JudgeOutputError("judge output contains no result for the rubric dimensions")
 
 
@@ -172,6 +183,9 @@ def dimension_fields(item: object) -> DimensionFields:
     """
     if not isinstance(item, dict):
         raise JudgeOutputError("judge dimension result must be an object")
+    if (item.get("reason") is not None and item.get("reasoning") is not None
+            and item["reason"] != item["reasoning"]):
+        raise JudgeOutputError("contradictory judge reasons")
     verdict = item.get("verdict")
     if verdict is not None:
         if not isinstance(verdict, _SCALARS):
@@ -190,3 +204,16 @@ def dimension_fields(item: object) -> DimensionFields:
     if not isinstance(findings, list):
         raise JudgeOutputError("judge findings must be a list")
     return DimensionFields(verdict=verdict, score=item.get("score"), reason=reason, findings=findings)
+
+
+def decode_judge_object(text: object) -> dict:
+    """Strict bounded JSON object for the historical audit's single answer."""
+    if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_OUTPUT_BYTES:
+        raise JudgeOutputError("invalid audit output size or type")
+    try:
+        value = _DECODER.decode(text.strip())
+    except (ValueError, RecursionError) as exc:
+        raise JudgeOutputError("invalid audit JSON") from exc
+    if not isinstance(value, dict):
+        raise JudgeOutputError("audit output must be an object")
+    return value

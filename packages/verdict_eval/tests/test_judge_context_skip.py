@@ -37,11 +37,11 @@ class _CapturingProvider:
     def complete(self, req):
         # The user prompt is the second message
         self.last_prompt = req.messages[-1]["content"]
-        # Return PASS for every dimension named in DEFAULT_RUBRIC so parsing
-        # succeeds regardless of which subset was requested.
+        # The provider returns exactly the dimensions requested in this call.
         import json
-        verdicts = {d.name: {"reasoning": "ok", "verdict": "PASS"}
-                    for d in DEFAULT_RUBRIC.dimensions}
+        import re
+        names = re.findall(r"^- ([^:]+):", self.last_prompt, flags=re.MULTILINE)
+        verdicts = {name: {"reasoning": "ok", "verdict": "PASS"} for name in names}
         return _StubResponse(text=json.dumps(verdicts))
 
 

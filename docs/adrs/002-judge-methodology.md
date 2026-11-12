@@ -17,19 +17,20 @@ default rubric is binary PASS/FAIL per dimension and covers groundedness,
 relevance, completeness, safety, and instruction following. Binary dimensions
 are easier to calibrate and compare than broad numeric scales.
 
-PASS rate is `PASS / (PASS + FAIL)`. `UNCLEAR`, missing dimensions, malformed
-output normalized to `UNCLEAR`, and judge errors are coverage states and do not
+PASS rate is `PASS / (PASS + FAIL)`. `UNCLEAR`, missing dimensions, and judge
+errors are separate coverage states and do not
 enter the denominator. No scored values means unavailable, not zero percent.
 
 Every judge path decodes replies through one shared decoder
 (`verdict_eval.judge_output`). It accepts the reply's JSON inside a Markdown
 fence or prose and the per-dimension results as an object keyed by name or as
 a list of named objects, and it rejects duplicate keys, duplicate dimension
-names, and non-finite numbers. For trace and turn judging, a reply that is
-complete but malformed is normalized to `UNCLEAR` per dimension, while
-conversation grading records it as an `invalid_judge_output` error; a reply that is not a judgment at all,
-because the provider stopped at the output ceiling or it is oversized, is a
-retryable judge error. The decoder's contract version is part of every
+names, and non-finite numbers. Malformed replies, missing or extra dimensions,
+conflicting reasons, multiple answers, and invalid verdicts are execution errors.
+UNCLEAR means insufficient evidence or an inapplicable criterion. Missing capture
+alone is not an application failure; a complete answer with a demonstrated omission
+may FAIL. Explicit rubric/user writing requirements override generic style
+preferences. Scoped calls do not retry automatically. The decoder's contract version is part of every
 evaluator identity, because a different decoder turns the same provider text
 into a different judgment. Adapters send the judge's output budget plus a
 fixed reasoning allowance so models with built-in thinking can answer.
@@ -54,7 +55,14 @@ origins, with missing and unusable origins counted separately. These origins do
 not establish unobserved downstream protocols. The counts do not activate
 context-dependent dimensions or prove source support. The counts-only mode and
 full count-block template are part of evaluator identity; the projected counts
-are in the bounded evidence fingerprint. The default judge prompt is unchanged.
+are in the bounded evidence fingerprint.
+
+Scoped historical audits are a distinct optional evaluator using one bounded
+structured call. Explicit dimension policies distinguish historical factual
+requirements, final-response completion, and holistic quality. Original-turn
+assessments remain separate from retrospective findings and individual recovery.
+See [the audit contract](../EVALUATION_RELIABILITY.md) for bounds, provenance,
+strict validation, compatibility, and the limit of citation-membership checks.
 
 Bias mitigations include cross-family judging when practical, length-aware
 human review, and per-dimension scoring so one broad score cannot hide the

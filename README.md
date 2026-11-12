@@ -25,6 +25,10 @@ The dashboard includes guided Home and setup, worker status, source and agent gr
 
 The [Agent Profiler guide](docs/AGENT_PROFILER.md) explains the investigation workflow and its evidence limits. The [onboarding guide](docs/ONBOARDING.md) covers capture, imports, evaluation, and monitor setup.
 
+Optional [historical audits](docs/EVALUATION_RELIABILITY.md) assess original turns
+and later recovery separately in one approved bounded call. Capture coverage,
+substantive evidence suitability, and judge execution errors remain distinct.
+
 ## Choose how to use Verdict
 
 | Your starting point | Start here | What Verdict records |
