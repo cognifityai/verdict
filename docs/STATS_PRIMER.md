@@ -556,11 +556,22 @@ For each binary metric in an eligible Monitor group:
 6. alert only when both the adjusted p-value and minimum absolute rate-change
    thresholds pass.
 
-The `response_empty` metric means the **captured response text** is blank after
-trimming whitespace. Calls with no captured response field are excluded from
-that metric. A successful tool-only completion can have blank text, so a
-significant change in this rate is labeled a text-pattern change, not proof of
-a quality regression or task failure.
+The `response_empty` metric means the call returned **no answer text and no
+tool call** for the application to run. A reply that only asks for a tool call
+is not blank. A reply counts as blank only when the capture can rule out an
+omitted tool call: SDK capture records the call's tool-call count, including
+zero, or the provider reported a stop reason. An empty reply without either,
+such as an OpenAI Responses call captured before the tool-call count existed,
+is left out of the metric rather than guessed. Calls with no captured response
+field, and calls with a recorded provider error, are excluded from
+`response_empty` and `refusal_signature`; a provider error is measured only by
+`provider_error`. A significant change in the blank rate is a capture-level
+pattern change, not proof of a quality regression or task failure.
+
+Each frozen cohort records the version of these metric definitions. When a
+definition changes, a monitor whose reference was measured under the earlier
+definition requires a new reviewed reference instead of comparing counts
+computed two different ways.
 
 For every metric cell, the frozen cohort summary also retains the first five
 true and first five false unit identities in cohort order. The summaries are the

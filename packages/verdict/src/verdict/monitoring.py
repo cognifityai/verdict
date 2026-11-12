@@ -35,6 +35,12 @@ MAX_MONITOR_GROUP_METRICS = 4_000
 MAX_MONITOR_SNAPSHOT_BYTES = 4_194_304
 MAX_MONITOR_EVIDENCE_UNIT_IDS = 5
 EVIDENCE_FINALIZATION_VERSION = 1
+# Version of the deterministic trace metric definitions. Version 1: a reply
+# with client tool calls is not blank, a reply whose capture cannot rule out a
+# tool call is not measured as blank, and a call with a recorded provider error
+# measures no response metric. A manifest frozen under an older definition must
+# be re-bootstrapped instead of compared with counts computed under this one.
+METRIC_CONTRACT_VERSION = 1
 
 
 class MonitorRebootstrapRequired(ValueError):
@@ -386,6 +392,7 @@ class CohortManifest:
     pending_evaluator_units: tuple[FrozenPendingEvaluatorUnit, ...] = ()
     evidence_finalization_version: int = 0
     prospective_start_at: datetime | None = None
+    metric_contract_version: int = 0
 
     def __post_init__(self) -> None:
         for name in ("snapshot_id", "policy_fingerprint"):
@@ -442,6 +449,8 @@ class CohortManifest:
             raise ValueError("unsupported evidence finalization version")
         if self.prospective_start_at is not None:
             _aware(self.prospective_start_at, "prospective_start_at")
+        if self.metric_contract_version not in {0, METRIC_CONTRACT_VERSION}:
+            raise ValueError("unsupported monitor metric contract version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -957,6 +966,7 @@ def _manifest(
             for item in pending_evaluator_units
         ],
         "evidence_finalization_version": evidence_finalization_version,
+        "metric_contract_version": METRIC_CONTRACT_VERSION,
     }
     if prospective_start_at is not None:
         identity_payload["prospective_start_at"] = prospective_start_at.isoformat()
@@ -980,6 +990,7 @@ def _manifest(
         pending_evaluator_units,
         evidence_finalization_version,
         prospective_start_at,
+        METRIC_CONTRACT_VERSION,
     )
 
 
@@ -1042,6 +1053,7 @@ def monitor_requires_rebootstrap(
     return (
         manifest.reference_summary is None
         or manifest.current_summary is None
+        or manifest.metric_contract_version != METRIC_CONTRACT_VERSION
         or (policy.grouping_mode == "cluster" and policy.cluster_registry_version_id is None)
         or (
             policy.evaluator_fingerprint is not None
@@ -1396,7 +1408,11 @@ def trace_monitor_units(
     """Project genuine LLM calls and one frozen evaluator into monitor units."""
     from verdict.schema import JudgmentStatus
     from verdict.structural import is_refusal
-    from verdict.trace_facts import trace_evidence_reason, trace_judge_evidence_digest
+    from verdict.trace_facts import (
+        response_is_blank,
+        trace_evidence_reason,
+        trace_judge_evidence_digest,
+    )
 
     units = []
     for trace in traces:
@@ -1406,11 +1422,16 @@ def trace_monitor_units(
         ):
             continue
         metrics = {"provider_error": trace.error is not None}
-        if trace.response_redacted is not None:
-            metrics.update({
-                "response_empty": not bool(trace.response_redacted.strip()),
-                "refusal_signature": is_refusal(trace.response_redacted),
-            })
+        # A failed call has no model answer to measure; any text is an error notice.
+        if trace.error is None and trace.response_redacted is not None:
+            metrics["refusal_signature"] = is_refusal(trace.response_redacted)
+            blank = response_is_blank(
+                response=trace.response_redacted,
+                tags=trace.tags,
+                finish_reason=trace.finish_reason,
+            )
+            if blank is not None:
+                metrics["response_empty"] = blank
         metric_states = {}
         evaluator_state = "not_requested"
         evaluator_evidence_digest = None
@@ -1551,6 +1572,7 @@ def monitor_snapshot_to_json(
                 for item in manifest.pending_evaluator_units
             ],
             "evidence_finalization_version": manifest.evidence_finalization_version,
+            "metric_contract_version": manifest.metric_contract_version,
         },
         "comparison": {
             "status": comparison.status.value,
@@ -1632,6 +1654,7 @@ def monitor_snapshot_from_json(
                 if manifest_data.get("prospective_start_at") is not None
                 else None
             ),
+            manifest_data.get("metric_contract_version", 0),
         )
         comparison = MonitorComparison(
             MonitorStatus(comparison_data["status"]),

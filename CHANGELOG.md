@@ -6,6 +6,14 @@ the product is refined.
 
 ## [Unreleased]
 
+### Changed
+
+- Monitor's blank-response metric no longer counts a reply that asks the
+  application to run a tool, and leaves out an empty reply whose capture cannot
+  rule out a tool call. Calls with a recorded provider error measure only
+  `provider_error`. Each frozen cohort records its metric-definition version;
+  monitors with an earlier reference require a new reviewed reference.
+
 ### Fixed
 
 - Claude Code API-error messages (usage limits, authentication and server

@@ -19,6 +19,49 @@ _END_NOT_SUPPLIED = object()
 # capture keeps only answer text, so without this fact a tool-calling reply
 # is indistinguishable from a blank one.
 RESPONSE_TOOL_CALLS_TAG = "verdict.response_tool_calls"
+# Finish reasons that name a tool call, for traces captured before the tag and
+# for imports: OpenAI ``tool_calls``/``function_call``, Anthropic ``tool_use``,
+# OpenTelemetry GenAI ``tool_call``.
+_TOOL_CALL_FINISH_REASONS = frozenset({"tool_calls", "tool_use", "function_call", "tool_call"})
+
+
+# OpenAI Responses reports its lifecycle status where other providers report a
+# stop reason, so an empty "completed" response may have been a tool call.
+_STATUS_ONLY_FINISH_REASONS = frozenset({"completed", "in_progress", "queued"})
+
+
+def _recorded_tool_call_count(tags: object) -> int | None:
+    count = tags.get(RESPONSE_TOOL_CALLS_TAG) if isinstance(tags, dict) else None
+    return int(count) if isinstance(count, str) and count.isdigit() else None
+
+
+def response_has_tool_calls(*, tags: object, finish_reason: object) -> bool:
+    """Return whether the provider answered with at least one client tool call."""
+    count = _recorded_tool_call_count(tags)
+    return (count is not None and count > 0) or finish_reason in _TOOL_CALL_FINISH_REASONS
+
+
+def response_is_blank(*, response: object, tags: object, finish_reason: object) -> bool | None:
+    """Classify a completed reply as blank, answered, or not decidable (None).
+
+    A reply is blank only when it has no answer text, no client tool call, and
+    the capture establishes that no call was omitted: a recorded tool-call count
+    of zero, or a provider stop reason. A status-only or missing finish reason
+    without a recorded count cannot distinguish a tool call from a blank reply.
+    """
+    if not isinstance(response, str):
+        return None
+    if text_is_present(response) or response_has_tool_calls(
+        tags=tags, finish_reason=finish_reason,
+    ):
+        return False
+    if _recorded_tool_call_count(tags) == 0:
+        return True
+    if isinstance(finish_reason, str) and finish_reason and (
+        finish_reason not in _STATUS_ONLY_FINISH_REASONS
+    ):
+        return True
+    return None
 
 
 def trace_evidence_state(*, error: object, ended_at: object) -> str:
