@@ -94,6 +94,7 @@ from verdict.redaction import (
     sanitize_span,
     sanitize_trace,
 )
+from verdict.run_monitoring import RunMonitorFacts
 from verdict.schema import (
     ActiveClusterRegistry,
     ClusterIdentity,
@@ -130,6 +131,7 @@ from verdict.storage.base import (
     _validate_drift_run_snapshot,
     _validate_evaluator_judgment_query,
 )
+from verdict.storage.run_monitor_facts import run_monitor_facts_from_records
 
 
 def _trace_tenant_matches(stored: str | None, requested: str) -> bool:
@@ -858,6 +860,18 @@ class InMemoryStorage:
             ]
         bundles.sort(key=lambda bundle: (bundle.run.started_at, bundle.run.run_id), reverse=True)
         return bundles[:limit]
+
+    def load_run_monitor_facts(self, tenant_id: str) -> list[RunMonitorFacts]:
+        _validate_agent_bundle_query(tenant_id, 1)
+        with self._agent_evidence_lock:
+            return run_monitor_facts_from_records(
+                (run for (scope, _), run in self._agent_runs.items() if scope == tenant_id),
+                (
+                    (run_id, event)
+                    for (scope, run_id, _), event in self._agent_events.items()
+                    if scope == tenant_id
+                ),
+            )
 
     def load_logical_session_monitor_evidence(
         self,

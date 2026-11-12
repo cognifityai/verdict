@@ -573,6 +573,34 @@ definition changes, a monitor whose reference was measured under the earlier
 definition requires a new reviewed reference instead of comparing counts
 computed two different ways.
 
+### Run outcome comparisons
+
+A historical comparison can use recorded Agent Runs instead of model calls.
+Each run contributes up to three boolean outcomes, using the same Fisher test,
+Benjamini–Hochberg correction and minimum effect:
+
+- `run_failed`: the run ended failed or timed out. Measured only when the run
+  reported a terminal status; a cancelled run counts as not failed.
+- `run_tool_error`: at least one tool result reported failure. Measured only
+  when at least one tool result reported an outcome.
+- `run_model_call_error`: at least one model call failed. Measured only when a
+  model call reported a status.
+
+An outcome the source did not report is left out, never counted as success.
+A run whose events were truncated at capture measures no tool or model-call
+outcome, because the omitted events may contain a failure. Local Claude Code
+and Codex histories do not report a run status, so `run_failed` applies only
+to sources that do, such as `verdict.agent_run(...)`.
+
+A run joins a comparison once it has ended, or once it has had no new event for
+30 minutes. A run that is still open holds back every run that started after it,
+so short runs that finish first cannot fill a cohort on their own. Membership is
+ordered by run start time. Grouping is either none or the recorded agent name.
+
+Run comparisons are historical only. A run's outcome can change while it is
+open, so a run comparison is not saved and cannot be activated as a prospective
+monitor. Use explicit date ranges to compare runs before and after a release.
+
 For every metric cell, the frozen cohort summary also retains the first five
 true and first five false unit identities in cohort order. The summaries are the
 single stored owner of those identities. For an alert, the dashboard selects

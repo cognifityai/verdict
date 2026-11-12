@@ -28,7 +28,7 @@ async function render(component) {
       contents: `
         import React from "react";
         import { renderToStaticMarkup } from "react-dom/server";
-        import { AgentEvaluatorDiscoveryNote, LogicalSessionPreview, Monitor, MonitorComparisonMetrics } from "./Monitor.jsx";
+        import { AgentEvaluatorDiscoveryNote, LogicalSessionPreview, Monitor, MonitorComparisonMetrics, RunComparisonPreview } from "./Monitor.jsx";
         export default renderToStaticMarkup(${component});
       `,
       resolveDir: new URL("..", import.meta.url).pathname,
@@ -55,7 +55,7 @@ test("monitor offers existing evaluators but defaults to deterministic checks", 
   assert.match(html, /Measurement/);
   assert.match(html, /judge · quality v1/);
   assert.match(html, /<option value="" selected="">Deterministic trace checks only<\/option>/);
-  assert.match(html, /provider errors, blank captured response text, and refusal-like language/);
+  assert.match(html, /provider errors, blank replies, and refusal-like language/);
   assert.match(html, /Preview comparison/);
   assert.doesNotMatch(html, /Preview candidate/);
 });
@@ -322,8 +322,8 @@ test("monitor status shows active authority beside a newer candidate", async () 
   assert.match(html, /ACTIVE PROSPECTIVE MONITOR/);
   assert.match(html, /Provider error rate/);
   assert.match(html, /EXPLORATORY HISTORICAL COMPARISON/);
-  assert.match(html, /Blank captured response-text rate/);
-  assert.match(html, /A tool-only completion can have no response text/);
+  assert.match(html, /Blank reply rate/);
+  assert.match(html, /no answer text and no tool call/);
 });
 
 test("blank captured text alerts describe a change without claiming a quality regression", async () => {
@@ -333,7 +333,7 @@ test("blank captured text alerts describe a change without claiming a quality re
       p_value: 0.001, p_adjusted: 0.003, reference_n: 30, current_n: 30 }],
       metric_coverage: [], groups: [] }
   })`);
-  assert.match(html, /Blank captured response-text rate/);
+  assert.match(html, /Blank reply rate/);
   assert.match(html, /TEXT PATTERN CHANGED/);
   assert.doesNotMatch(html, /REGRESSION|IMPROVEMENT/);
 });
@@ -408,4 +408,33 @@ test("snapshotless active monitor shows only the re-bootstrap guidance", async (
   assert.match(html, /This monitor uses an unsupported analysis unit/);
   assert.match(html, /Configure the replacement/);
   assert.doesNotMatch(html, /No comparison configured/);
+});
+
+test("run outcome comparison is statistical, historical, and opens runs", async () => {
+  const response = { state: "historical_run", policyState: "not_saved", activationAllowed: false,
+    snapshot: {
+      manifest: { reference_unit_ids: Array(40).fill("r"), current_unit_ids: Array(40).fill("c"),
+        reference_summary: { metrics: [{ group_id: null, metric: "run_failed",
+          true_unit_ids: [], false_unit_ids: ["run-ref-1"] }] },
+        current_summary: { metrics: [{ group_id: null, metric: "run_failed",
+          true_unit_ids: ["run-cur-1"], false_unit_ids: [] }] } },
+      comparison: { status: "alert", metric_coverage: [], groups: [], metrics: [{
+        metric: "run_failed", alert: true, reference_value: 0.0, current_value: 0.41,
+        effect: 0.41, p_value: 1e-50, p_adjusted: 1e-50, reference_n: 40, current_n: 40 }] } } };
+  const html = await render(`React.createElement(RunComparisonPreview, {
+    response: ${JSON.stringify(response)}, onOpenRun: () => {} })`);
+  assert.match(html, /RUN OUTCOMES · HISTORICAL STATISTICAL COMPARISON/);
+  assert.match(html, /1 significant change in recorded run outcomes/);
+  assert.match(html, /Failed or timed-out run rate/);
+  assert.match(html, /REGRESSION/);
+  assert.match(html, /cannot be activated as a monitor/);
+  assert.match(html, /run-cur-1/);
+  assert.doesNotMatch(html, /Activate reviewed monitor/);
+});
+
+test("run unit offers agent grouping and no evaluator or prospective target", async () => {
+  const html = await render(`React.createElement(Monitor, { configUrl: "/api/config",
+    agentRunCount: 12, initialState: {} })`);
+  assert.match(html, /<option value="run">Agent run outcomes \(historical, statistical\)<\/option>/);
+  assert.match(html, /Minimum change \(percentage points\)/);
 });

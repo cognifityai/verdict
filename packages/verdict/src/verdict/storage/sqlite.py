@@ -108,6 +108,7 @@ from verdict.redaction import (
     sanitize_span,
     sanitize_trace,
 )
+from verdict.run_monitoring import RunMonitorFacts
 from verdict.schema import (
     ActiveClusterRegistry,
     ClusterIdentity,
@@ -151,6 +152,7 @@ from verdict.storage.base import (
     _validate_drift_run_snapshot,
     _validate_evaluator_judgment_query,
 )
+from verdict.storage.run_monitor_facts import read_run_monitor_facts
 from verdict.storage.turn_tool_evidence import (
     read_turn_tool_counts,
     read_turn_tool_counts_batch,
@@ -2337,6 +2339,15 @@ class SQLiteStorage:
                 tenant_id,
                 tuple(row["run_id"] for row in rows),
             )
+
+    def load_run_monitor_facts(self, tenant_id: str) -> list[RunMonitorFacts]:
+        _validate_agent_bundle_query(tenant_id, 1)
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                return read_run_monitor_facts(self._conn, postgres=False, tenant_id=tenant_id)
+            finally:
+                self._conn.rollback()
 
     def load_logical_session_monitor_evidence(
         self,

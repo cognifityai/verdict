@@ -142,7 +142,7 @@ def test_non_trace_monitor_projection_fails_before_storage_read(
         )
 
 
-@pytest.mark.parametrize("analysis_unit", ["turn", "run", "session"])
+@pytest.mark.parametrize("analysis_unit", ["turn", "session"])
 def test_non_trace_monitor_direct_calculations_are_rejected(
     analysis_unit: str,
 ) -> None:
@@ -434,3 +434,26 @@ def test_latest_evaluator_judgments_are_tenant_scoped_and_completion_is_absorbin
 
     assert [row.judgment_id for row in rows] == ["old"]
     assert rows[0].status is JudgmentStatus.COMPLETED
+
+
+def test_run_units_are_historical_only() -> None:
+    trace_policy = _policy()
+    units = tuple(
+        AnalysisUnitRecord(f"run-{index}", NOW + timedelta(minutes=index),
+                           {"run_failed": index >= 3})
+        for index in range(6)
+    )
+    policy = replace(trace_policy, analysis_unit="run")
+    manifest = plan_historical_manifest(units, policy, cutoff=NOW + timedelta(hours=1))
+    comparison = compare_manifest(units, manifest, policy)
+    assert comparison.metrics[0].metric == "run_failed"
+
+    with pytest.raises(ValueError, match="only the trace analysis unit"):
+        plan_prospective_manifest(manifest, units, policy)
+    assert monitor_requires_rebootstrap(policy, manifest) is True
+    for invalid in (
+        replace(policy, grouping_mode="provider_model"),
+        replace(trace_policy, grouping_mode="agent"),
+    ):
+        with pytest.raises(ValueError):
+            plan_historical_manifest(units, invalid, cutoff=NOW + timedelta(hours=1))

@@ -34,8 +34,9 @@ from verdict.monitoring import (
     monitor_snapshot_to_json,
     plan_historical_manifest,
     plan_prospective_manifest,
-    validate_monitor_analysis_unit,
+    validate_historical_analysis_unit,
 )
+from verdict.run_monitoring import load_run_monitor_units
 from verdict.session_monitoring import preview_logical_sessions
 
 TENANT = LOCAL_TENANT
@@ -60,6 +61,18 @@ _BOUNDED_MONITOR_ERRORS = {
     "monitor grouping produces too many metric cells": (
         "This monitor has too many group and metric combinations. Reduce its "
         "groups or evaluator dimensions."
+    ),
+    "run comparisons use recorded outcomes only": (
+        "Run comparisons use recorded run outcomes only; choose no evaluator."
+    ),
+    "run comparisons support no grouping or agent grouping": (
+        "Run comparisons support no grouping or grouping by agent name."
+    ),
+    "run comparison exceeds bounded run limit": (
+        "Run comparison supports at most 100,000 runs in one tenant snapshot."
+    ),
+    "run comparison is unavailable for this storage": (
+        "Run comparison is unavailable for this storage backend."
     ),
     "logical-session comparison does not support grouping": (
         "Logical-session comparison does not support grouping."
@@ -182,7 +195,7 @@ class MonitorRoutes:
                     else parsed.astimezone(timezone.utc)
                 )
         policy = MonitorPolicy(**values)
-        validate_monitor_analysis_unit(policy)
+        validate_historical_analysis_unit(policy)
         return policy
 
     def cluster_registry_selection(self, writable, payload: dict[str, Any]):
@@ -275,6 +288,23 @@ class MonitorRoutes:
             ),
         )
         return preview_logical_sessions(evidence, **values).as_dict()
+
+    def run_preview(self, writable, payload: dict[str, Any]) -> dict[str, object]:
+        """Compare recorded run outcomes historically; nothing is saved or activated."""
+        if payload.get("evaluatorFingerprint"):
+            raise ValueError("run comparisons use recorded outcomes only")
+        policy = self.policy(payload, f"run-preview-{secrets.token_hex(12)}")
+        now = datetime.now(timezone.utc)
+        units = load_run_monitor_units(
+            writable, tenant_id=self.tenant_id, now=now, grouping_mode=policy.grouping_mode,
+        )
+        manifest = plan_historical_manifest(units, policy, cutoff=now)
+        comparison = compare_manifest(units, manifest, policy)
+        result = self.response(
+            policy, "historical_run", manifest, comparison, policy_state="not_saved",
+        )
+        result["activationAllowed"] = False
+        return result
 
     @staticmethod
     def response(
@@ -431,6 +461,9 @@ class MonitorRoutes:
                 if payload.get("analysisUnit", "trace") == "logical_session":
                     writable = self.setup.writable_storage()
                     return self.logical_session_preview(writable, payload)
+                if payload.get("analysisUnit") == "run":
+                    writable = self.setup.writable_storage()
+                    return self.run_preview(writable, payload)
                 policy = self.policy(
                     payload,
                     f"policy-{secrets.token_hex(12)}",
