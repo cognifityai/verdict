@@ -73,6 +73,15 @@ the captured Trace has no error field. It does not establish a completed or
 successful model response. Exact Trace IDs remain available for authenticated
 drilldown even when the ID resembles sensitive text; captured prompt, response,
 and error content remain redacted.
+Claude Code records a failed provider request, such as a usage limit, an
+authentication failure or a server error, as an assistant message marked as an
+API error. Local history import stores that model call as failed, with the
+source's error code and HTTP status as the provider error, for example
+`rate_limit (HTTP 429)`. Its notice text is not model output, so the call is not
+eligible for response judging. The run's status is unchanged, because Claude
+Code can continue the same run after the limit resets. Rescanning history that
+an earlier release imported reclassifies these calls without changing evidence
+IDs.
 The Model calls list defers previews longer than 8,000 characters for a prompt
 or provider error, or 600 characters for a response. Selecting the exact Trace
 redacts its full recorded content before showing a bounded preview; the UI

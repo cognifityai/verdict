@@ -15,6 +15,11 @@ from verdict.structural import (
 _JUDGE_EVIDENCE_DIGEST_VERSION = "judge-evidence-v1"
 _END_NOT_SUPPLIED = object()
 
+# Capture records how many tool calls a provider response contained. Text
+# capture keeps only answer text, so without this fact a tool-calling reply
+# is indistinguishable from a blank one.
+RESPONSE_TOOL_CALLS_TAG = "verdict.response_tool_calls"
+
 
 def trace_evidence_state(*, error: object, ended_at: object) -> str:
     """Classify recorded execution evidence without inferring provider success."""

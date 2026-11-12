@@ -18,6 +18,7 @@ from verdict.instrumentors.base import (
     decide_persist,
     is_verdict_wrapt_wrapper,
     normalize_finish_reason,
+    record_response_tool_calls,
     should_sample_trace,
 )
 from verdict.pricing import compute_cost_usd
@@ -144,6 +145,34 @@ def _responses_output_text(response: Any) -> str:
             if isinstance(refusal, str) and refusal:
                 parts.append(refusal)
     return "\n".join(parts)
+
+
+# Output items the application must execute or approve. Hosted tools (web or
+# file search, code interpreter, remote MCP calls) run inside the provider and
+# do not replace the answer, so a response with only those is still blank.
+_CLIENT_RESPONSES_CALL_TYPES = frozenset({
+    "function_call",
+    "custom_tool_call",
+    "computer_call",
+    "local_shell_call",
+    "shell_call",
+    "apply_patch_call",
+    "mcp_approval_request",
+})
+
+
+def _responses_tool_call_count(response: Any) -> int:
+    """Count Responses output items that hand control back to the application."""
+    return sum(
+        getattr(item, "type", None) in _CLIENT_RESPONSES_CALL_TYPES
+        for item in getattr(response, "output", None) or []
+    )
+
+
+def _chat_message_tool_call_count(message: Any) -> int:
+    """Count tool calls, including the legacy single ``function_call``."""
+    calls = getattr(message, "tool_calls", None) or []
+    return len(calls) + (1 if getattr(message, "function_call", None) else 0)
 
 
 def _response_error_text(value: Any) -> str | None:
@@ -781,6 +810,7 @@ class OpenAIInstrumentor(BaseInstrumentor):
                 trace.input_tokens,
                 trace.output_tokens,
             )
+            record_response_tool_calls(trace, _responses_tool_call_count(response))
             if self.client.capture_content:
                 text = _responses_output_text(response)
                 trace.response_redacted = redact(
@@ -853,8 +883,9 @@ class OpenAIInstrumentor(BaseInstrumentor):
             if choices:
                 first = choices[0]
                 trace.finish_reason = normalize_finish_reason(getattr(first, "finish_reason", None))
+                msg = getattr(first, "message", None)
+                record_response_tool_calls(trace, _chat_message_tool_call_count(msg))
                 if self.client.capture_content:
-                    msg = getattr(first, "message", None)
                     text = getattr(msg, "content", "") if msg is not None else ""
                     trace.response_redacted = redact(
                         text,
@@ -886,6 +917,7 @@ class _StreamingWrapper:
         self._t0 = t0
         self._instr = instr
         self._text_chunks: list[str] = []
+        self._tool_call_indexes: set[object] = set()
         self._usage: Any = None
         self._finish_reason: str | None = None
         self._finalized = False
@@ -965,6 +997,11 @@ class _StreamingWrapper:
                     txt = getattr(delta, "content", None)
                     if txt and self._instr.client.capture_content:
                         self._text_chunks.append(txt)
+                    # A streamed call spans many deltas that share one index.
+                    for call in getattr(delta, "tool_calls", None) or []:
+                        self._tool_call_indexes.add(getattr(call, "index", None))
+                    if getattr(delta, "function_call", None):
+                        self._tool_call_indexes.add("function_call")
                 fr = getattr(first, "finish_reason", None)
                 if fr:
                     self._finish_reason = normalize_finish_reason(fr)
@@ -1002,6 +1039,7 @@ class _StreamingWrapper:
                     self._trace.output_tokens = out_tok
             if self._finish_reason is not None:
                 self._trace.finish_reason = self._finish_reason
+            record_response_tool_calls(self._trace, len(self._tool_call_indexes))
             self._trace.cost_usd = compute_cost_usd(
                 self._trace.response_model or self._trace.request_model,
                 self._trace.input_tokens,

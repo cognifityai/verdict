@@ -6,6 +6,17 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude Code API-error messages (usage limits, authentication and server
+  errors) import as failed model calls with the source error code and HTTP
+  status, instead of successful calls. Rescanning previously imported history
+  reclassifies them in place.
+- SDK capture records the number of client tool calls in each completed
+  provider response, including zero (`verdict.response_tool_calls`), for OpenAI
+  chat and Responses, Anthropic and Google, streaming included. Google captures no longer render function-call
+  parts or thoughts as response text.
+
 ## [0.1.0b6] - 2026-11-06
 
 ### Added
