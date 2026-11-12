@@ -6,7 +6,7 @@
 
 Verdict connects an agent's runs, turns, tools, tests, and application-reported outcomes to the model calls made along the way. It helps answer what happened, where time and tokens went, which failures need attention, and whether measured behavior changed. The dashboard brings capture, investigation, evaluation, comparison, and monitoring into one workflow.
 
-Verdict is local-first. A Python application can write to SQLite or PostgreSQL, or spool bounded records for a separate local service to import. Claude Code and Codex history imports are additional ways to explore agent activity; they are not the scope of the product.
+Verdict is local-first. A Python application can write to SQLite or PostgreSQL, or spool bounded records that `verdict-import agent-file` or the shipper and collector bring into a store. Claude Code and Codex history imports are additional ways to explore agent activity; they are not the scope of the product.
 
 The dashboard includes guided Home and setup, worker status, source and agent groups, and optional explanations of selected evidence. This README describes the source checkout; the published package can lag until the next release.
 
@@ -18,7 +18,7 @@ The dashboard includes guided Home and setup, worker status, source and agent gr
 
 | Workflow | Evidence and result |
 | --- | --- |
-| **Observe an application agent** | Record runs, turns, tool calls and results, tests, feedback, and explicit business outcomes. Supported Anthropic, OpenAI, and Google SDK calls add genuine model-call traces with provider-reported usage, latency, finish reason, and errors where available. |
+| **Observe an application agent** | Record runs, turns, tool calls and results, tests, feedback, and explicit business outcomes. Supported Anthropic, OpenAI, and Google SDK calls add genuine model-call traces with provider-reported usage, finish reason, and errors where available, plus call latency measured by Verdict around the SDK call. |
 | **Investigate an issue** | Start from Home's recorded issues or usage evidence, open the affected session or run, and inspect the linked event, timeline, and suggested next check. The report summarizes application and model-call activity with coverage shown. |
 | **Evaluate and test a change** | Run deterministic checks on recorded evidence. Preview a bounded session, run, turn, tool action, or model call before an optional judge evaluation. Save reviewed cases and compare a configured application baseline and candidate against the same checks. |
 | **Monitor ongoing activity** | Schedule deterministic analysis of captured agent activity. Separately, review and activate a prospective statistical monitor for genuine provider model calls, with sample and evaluator gates; configure notifications if needed. |
@@ -75,7 +75,7 @@ is still being written.
 Use **Cancel capture** to stop after the current file; already imported files
 remain available, and previewing the roots again allows a safe rescan.
 Verdict reads those files without replaying agent commands. After capture,
-**Home** shows recorded usage and any issues; **Investigation → Agent runs** opens
+**Home** shows recorded usage and any issues; **Investigation → Agent Runs & Tools** opens
 individual sessions. To import newer history later, use **Settings → Data
 Sources → Manage data sources**. This import and the key-free views need no
 provider API key. See the [local-history guide](docs/ONBOARDING.md#3-import-local-claude-code-or-codex-history)
@@ -149,7 +149,7 @@ before relying on this deployment for production monitoring.
 Verdict has two monitoring paths:
 
 1. **Agent activity:** Home and Monitoring link recorded issues to affected runs and events. Suggested setup proposes checks that fit the captured sources. Run a local check once, review its result, and then save a recurring plan. A separately supervised `verdict-service` worker must run future cycles; Monitoring shows its heartbeat and actual cycle outcome. Saved historical findings and notices from post-activation activity are labeled separately.
-2. **Model-call changes:** Preview reference and current cohorts of eligible completed provider calls, review sample readiness, and activate a prospective policy for new traffic. Verdict judge and paired-replay calls are excluded. Provider errors and selected response signals can be checked without a judge; calibrated judge dimensions are optional. Statistical alerts apply to genuine model-call traces, while agent-session comparisons remain descriptive. See [how statistical monitoring works](docs/STATS_PRIMER.md).
+2. **Model-call changes:** Preview reference and current cohorts of eligible completed provider calls, review sample readiness, and activate a prospective policy for new traffic. Verdict judge and paired-replay calls are excluded. Provider errors, blank responses, and refusal-like language can be checked without a judge; stored judge PASS/FAIL dimensions from one frozen evaluator are optional. Monitor does not test latency, token, or cost changes. Statistical alerts apply to genuine model-call traces, while agent-session comparisons remain descriptive. See [how statistical monitoring works](docs/STATS_PRIMER.md).
 
 A selected day, session, run, turn, tool event, model call, or supported span can request an optional AI explanation. Verdict previews bounded redacted evidence, destination, and a static price estimate before an approved provider call. The model response is shown separately as unverified advice; a completed call does not verify its diagnosis. AI can also draft setup suggestions, but the user reviews the plan and Verdict validates its eligibility before activation. See [monitor setup](docs/ONBOARDING.md#7-see-findings-evaluate-deliberately-and-configure-monitoring) for scheduling, notices, delivery, and approval details.
 

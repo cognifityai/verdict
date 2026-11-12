@@ -8,6 +8,10 @@ verdict-import file examples/telemetry/otlp-genai.json \
   --format otlp --storage sqlite:///./verdict.db --tenant-id demo
 ```
 
+Start the dashboard with the same `--tenant-id demo`; its default tenant is
+`__verdict_local__`. The sample timestamps are fixed, so they may fall outside
+Home's 30-day usage window.
+
 The JSONL examples use one source record per line. OTLP uses its normal export
 envelope. MLflow and Phoenix keep their trace/span nesting. Voice transcripts
 contain text only; Verdict never imports audio bytes or audio URLs. Voice import
@@ -19,14 +23,14 @@ top-level `labels` object, for example `{"persona":"example_avatar","group":"exa
 lets that comparison show source-group mix and within-group rates; keys must
 match `[a-z][a-z_]{0,31}`, with at most eight nonsensitive keys and 128 UTF-8 bytes per
 redacted string value. Changing a label invalidates the old grade. The view
-does not create a prospective alert or semantic cluster. The published
-`0.1.0a22` packages do not store these snapshots.
+does not create a prospective alert or semantic cluster.
 For a dated conversation, set top-level `ended_at` (or `end_time`) on each Voice
 record; turn-level timestamps do not set the conversation end time. Verdict
 stores the normalized UTC value as `event_at`. If neither source field is
 present, the snapshot is untimed and retention starts at first import.
 
-For an exploratory paired comparison in **Investigate → Compare**, put an opaque
+For an exploratory paired comparison in **Investigation → Other investigation views → Compare recorded
+conversations**, put an opaque
 `pair_id` and `variant` in each source conversation's top-level `labels`; use
 the same pair ID only for two variants of the same evaluation input. Both
 conversations need current whole-conversation grades from one evaluator and

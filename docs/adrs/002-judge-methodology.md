@@ -25,8 +25,9 @@ Every judge path decodes replies through one shared decoder
 (`verdict_eval.judge_output`). It accepts the reply's JSON inside a Markdown
 fence or prose and the per-dimension results as an object keyed by name or as
 a list of named objects, and it rejects duplicate keys, duplicate dimension
-names, and non-finite numbers. A reply that is complete but malformed is
-normalized to `UNCLEAR` per dimension; a reply that is not a judgment at all,
+names, and non-finite numbers. For trace and turn judging, a reply that is
+complete but malformed is normalized to `UNCLEAR` per dimension, while
+conversation grading records it as an `invalid_judge_output` error; a reply that is not a judgment at all,
 because the provider stopped at the output ceiling or it is oversized, is a
 retryable judge error. The decoder's contract version is part of every
 evaluator identity, because a different decoder turns the same provider text

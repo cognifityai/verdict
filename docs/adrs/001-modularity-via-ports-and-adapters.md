@@ -1,6 +1,8 @@
 # ADR-001 — Modularity via Ports & Adapters
 
-**Status:** Accepted
+**Status:** Accepted. The `LLMProvider` and `Storage` ports exist; the
+`EventBus`, `VectorStore`, `EvalJudge`, `BlobStore`, and `MetricsSink` ports
+listed below were not implemented.
 **Date:** 2026-05-12
 
 ## Context

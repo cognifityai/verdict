@@ -43,7 +43,7 @@ A few things that are by design rather than vulnerabilities:
   linked trace IDs in dashboard API responses and URLs may contain source
   supplied text. Treat API responses, URLs, browser history, and access logs
   as sensitive even though display content is redacted.
-- The **dashboard** (`ui/`) serves one configured tenant and is intended for
+- The **dashboard** (`packages/verdict/src/verdict/dashboard/`) serves one configured tenant and is intended for
   localhost or a trusted network. Binding it to a
   non-localhost host without the `VERDICT_USER`/`VERDICT_PASS` basic-auth
   environment variables and an explicit `VERDICT_ALLOWED_HOSTS` allowlist is
@@ -51,6 +51,13 @@ A few things that are by design rather than vulnerabilities:
   dashboard API route except the public `/api/health` endpoint; a setup
   capability alone does not bypass it, including when the dashboard is mounted
   under a host application path. Terminate TLS at a trusted ingress.
+- **Without `VERDICT_USER` and `VERDICT_PASS` there is no login.** On a
+  loopback bind, any local process that can reach the port can read evidence,
+  obtain the per-process setup token from `/api/setup/token`, perform writes,
+  and approve a provider-backed call within the spend limit it supplies. Set
+  credentials on shared or multi-user hosts. The non-loopback check is enforced
+  by the `verdict-dashboard` CLI; an application that mounts `create_app()`
+  directly must apply its own access control.
 - A dashboard instance is configured for one tenant. Monitor policies can be
   activated only in that instance's tenant scope. Sharing a database across
   instances does not turn the dashboard into a hosted multi-tenant service;

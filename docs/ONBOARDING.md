@@ -20,7 +20,7 @@ unrelated `verdict` distribution from PyPI; it exposes the same import namespace
 and cannot safely coexist in one environment.
 
 ```bash
-uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
+uv venv --seed --python 3.12 && source .venv/bin/activate  # --seed adds pip; or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 python -m pip install --pre \
@@ -64,8 +64,10 @@ An empty loopback-only UI opens at Home. Choose **Set up capture**, then select
 **Claude Code / Codex** under **Settings → Data Sources**. The first source
 choice shows live SDK instrumentation; local-history import is the adjacent
 choice. Review the local directories, choose **Preview sources**, then explicitly approve
-the capture. Bounded redacted content capture is on by default; disable it only
-for an intentional metadata-only run. The server rejects capture when those
+the capture. Bounded redacted content capture is always on in this dashboard flow and in
+scheduled rescans; for a metadata-only local import use
+`verdict-import local --no-capture-content` and do not schedule rescans of
+those paths. The server rejects capture when those
 exact paths were not previewed in the current process. Source files are
 read-only and repeated rescans are idempotent.
 Codex Turn requests are taken from text in either legacy `user_message`
@@ -86,8 +88,8 @@ response time. Verdict never stores the diagnostic body or raw Codex source
 identifiers.
 
 Successful capture opens **Home**. Local execution evidence is under
-**Investigation → Agent runs** and genuine model calls are under
-**Investigation → LLM Calls**. Data-source actions remain under
+**Investigation → Agent Runs & Tools**; genuine model calls open from
+**Other investigation views → Browse model calls** on that page. Data-source actions remain under
 **Settings → Data Sources**, where **Manage data sources** asks you to approve local
 paths again. The header reports Agent Runs and LLM Calls separately.
 If a manual or worker check skips a local history file or cannot import its
@@ -246,7 +248,7 @@ capture is labeled, including when an earlier capture-limit marker means a
 later Turn has no stored events. No judge request is sent. The review shows observable
 behavior; it cannot reconstruct private reasoning or prove task correctness.
 
-In **Investigation → Agent runs**, select **Review recent follow-ups** to see
+In **Investigation → Agent Runs & Tools**, select **Review recent follow-ups** to see
 the newest 20 answered prior Turns followed by an ended recorded request in
 the same run. The later answer may be missing. Use **Load older follow-ups**
 to continue through earlier pairs. Each card shows a
@@ -371,9 +373,9 @@ Built-in criteria define PASS as supported desired behavior and FAIL as a
 supported problem. Review the exact criterion text before approving a call;
 changing it creates a different evaluator identity for later comparisons.
 From **Explain this day**, **Inspect session** moves focus to that session's
-detail after it loads. **Investigation → Agent runs** loads a bounded run
+detail after it loads. **Investigation → Agent Runs & Tools** loads a bounded run
 list first and expands only the selected run, so opening the list does not
-analyze every run on the page. From a selected run, **Browse runs**
+analyze every run on the page. From a selected run, **Browse <source> runs by <agent> →**
 opens that tenant's list filtered by the recorded agent name, or by source if
 the name was not recorded. Matching names do not establish the same task or
 recovery from an earlier failure.
@@ -513,8 +515,8 @@ This import URI contains no password. Supply database credentials through
 the PostgreSQL client environment or a protected service configuration; do
 not put a credentialed URI in command arguments or checked-in scripts.
 
-The spool carries provider Traces, Agent evidence, manual spans, and user
-signals in versioned JSONL with fixed record, segment, and directory byte
+The spool carries provider Traces, Agent evidence, and manual spans in
+versioned JSONL with fixed record, segment, and directory byte
 limits. An incomplete final record from a process crash is reported and ignored;
 a malformed complete record fails the import. Retain the files until the import
 succeeds. Completed appends bypass
@@ -579,7 +581,9 @@ instrumentation and no code changes**. In the dashboard, open **Evaluate →
 Inspect JSON**, upload or paste the export, and choose the format. The result is
 returned to the browser and can be downloaded as JSON. Analysis runs on the
 Verdict dashboard host; neither the source nor the report is added to the
-Verdict store.
+Verdict store. The optional judge sends sampled turns to Anthropic after you
+confirm egress; unlike scoped evaluation, it has no static price preview or
+spend limit.
 
 The same analysis remains available from the `verdict-inspect` CLI:
 
@@ -621,7 +625,12 @@ verdict-pipeline --storage sqlite:///./verdict.db \
 verdict-dashboard --storage sqlite:///./verdict.db --tenant-id my-team
 ```
 
-Keep the tenant identical across import, pipeline, and dashboard commands. A
+Keep the tenant identical across import and dashboard commands. In its
+default `--registry-mode off`, `verdict-pipeline` ignores `--tenant-id`, loads
+traces across all tenants up to `--limit` (10,000 by default), and stops with
+an error when the loaded traces span more than one tenant. That check covers
+only the loaded traces, not necessarily the whole database; use a registry mode
+to scope the run to one tenant. A
 non-default `verdict-import local --tenant-id` run prints this requirement. The
 dashboard default remains `__verdict_local__`, and selecting another tenant
 does not migrate or relabel stored rows. Browser `tenant=` parameters cannot
@@ -725,6 +734,10 @@ To run the active policy from cron, systemd, Kubernetes, or another scheduler:
 verdict-monitor run --storage sqlite:///./verdict.db
 ```
 
+`verdict-monitor` reads only the default `__verdict_local__` tenant and does
+not read `VERDICT_STORAGE`. For another tenant, run `verdict-service
+--tenant-id <id>` with the monitor enabled in the saved plan.
+
 Each invocation consumes at most one new prospective non-overlapping cohort.
 Late-arriving units remain eligible for the next open cohort rather than being
 dropped. Across repeated looks, Verdict spends the configured alpha with the
@@ -759,8 +772,9 @@ For voice logs, the generic schema emits one Trace for each completed assistant
 text turn and uses the preceding transcript as its prompt. It ignores audio
 bytes/URLs and interrupted turns. This is not a claim that a transcript turn is
 always a provider LLM call; tokens, model, cost, and latency are retained only
-when the exported turn contains them. Start with the contract fixtures and
-generator in `examples/telemetry/`. One source conversation is limited to 1,000
+when the exported turn contains them. Start with the contract fixtures in
+`examples/telemetry/` and the generator in
+`scripts/generate_telemetry_samples.py`. One source conversation is limited to 1,000
 turns and reports `conversation_turn_limit` when additional turns are omitted.
 The same import also stores one current, redacted text-only conversation
 snapshot. Malformed or truncated snapshots are labeled incomplete. Source end
@@ -846,6 +860,28 @@ client = Anthropic()
 # use the client normally — supported SDK calls are captured
 ```
 
+`verdict.init()` takes keyword arguments only. A second call logs a warning and
+returns the existing client.
+
+| Argument | Default | Effect |
+| --- | --- | --- |
+| `service_name` | `"unknown-service"` | Stamped on Traces and Agent Runs. |
+| `environment` | `"production"` | Stamped on Traces and Agent Runs. |
+| `storage` | `"sqlite:///./verdict.db"` | SQLite URL, `memory://`, or a PostgreSQL URL/conninfo string. |
+| `tenant_id` | `None` | Tenant stamped on captured records. |
+| `capture_content` | `True` | `False` keeps metadata only. |
+| `redaction_mode` | `"redact"` | `"redact"` or `"hash"`; `"hash"` requires `redaction_secret`. Other values are rejected. |
+| `sample_rate` | `1.0` | 0 to 1. Provider errors outside an Agent Run are always kept; inside a run the run's sampling decision applies to every record, including errors. |
+| `instrumentors` | `None` | `None` or an empty list installs every available provider wrapper; pass names such as `["anthropic"]` to restrict them. |
+| `buffered_writes` | `False` | Background write queue; call `verdict.shutdown()` before exit. |
+| `transport` | `"storage"` | `"file"` writes bounded spool segments to `spool_directory` and cannot be combined with `buffered_writes` or a non-default `storage`. |
+
+The SDK reads no environment variables of its own. The Anthropic wrapper
+captures `messages` text but not the separate `system=` argument; Anthropic and
+OpenAI Chat responses record text content, not assistant tool-call blocks. The
+legacy `google-generativeai` `GenerativeModel.generate_content` (synchronous)
+is also wrapped when that package is installed.
+
 Content capture is **on by default** (PII surface). Supported JSON-compatible message fields
 are recursively sanitized before content limits, `Trace` assignment, and storage. This
 includes nested OpenAI tool arguments and Anthropic-style tool inputs/results.
@@ -887,8 +923,8 @@ remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Set `capture_content=False`
 when the approved customer boundary is metadata-only; error categories remain
 available, but provider and manual-span exception messages are omitted. The current release profile also keeps
-`buffered_writes=False`; buffered mode requires an explicit `shutdown()`
-imported from `verdict.client` before process exit.
+`buffered_writes=False`; buffered mode requires an explicit `verdict.shutdown()`
+before process exit.
 
 Use only the provider methods listed in the
 [`release profile`](RELEASE_PROFILE.md). The current beta includes the

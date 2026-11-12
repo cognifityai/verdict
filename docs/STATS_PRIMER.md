@@ -92,7 +92,20 @@ and Benjamini-Hochberg correction covers the complete family for that look.
 New traffic is fully projected through a pinned cluster version before its
 monitor membership is saved, without refitting. Clustering is optional; without
 a facet, Monitor compares all eligible traffic. Unassigned or new groups are
-coverage evidence, not pooled observations. Fixed-window `DriftRun` and
+coverage evidence, not pooled observations.
+
+The tested metrics are booleans: `provider_error`, `response_empty` and
+`refusal_signature` from the stored trace, and `judge.<dimension>.pass` from
+one frozen evaluator's stored judgments. Latency, tokens, and cost are not
+tested. Each prospective look compares one new cohort of up to
+`prospective_target` calls (default 30) with the frozen reference; looks are
+not cumulative. A judge cell whose PASS plus FAIL count falls below the
+minimum because of UNCLEAR, missing, or error results is reported as coverage
+and left out of that look's test family. When unseen or unassigned groups
+exceed the configured share of the current cohort (default 20%), the result is
+`reference_stale` rather than a test. The evaluator fingerprint for trace and
+turn judges does not include a custom `ANTHROPIC_BASE_URL` or
+`OPENAI_BASE_URL`, so keep one endpoint per evaluator identity. Fixed-window `DriftRun` and
 `DriftSignal` records created by older releases remain readable through the
 Python storage API. They are excluded from the dashboard, and
 `verdict-pipeline` no longer creates them.
@@ -359,8 +372,8 @@ mass that shifted from PASS to FAIL.
 - **Common in ML monitoring.** Useful as a secondary distance-based view of
   distribution movement.
 
-Older fixed-window analysis computed this diagnostic. It does not activate a
-current Monitor alert.
+The semantic drift detector used by Inspect reports it per embedding
+dimension as a diagnostic. It does not activate a current Monitor alert.
 
 ### Limits
 
@@ -372,9 +385,9 @@ current Monitor alert.
 
 ## 9. Population Stability Index — PSI
 
-PSI is a distribution-shift diagnostic in older fixed-window analysis. It
-compares categorical or binned distributions; it is not a current Monitor
-alert gate.
+PSI is a distribution-shift diagnostic reported by the semantic drift
+detector used by Inspect. It compares binned distributions; it is not a
+current Monitor alert gate.
 
 ### The formula
 
@@ -397,15 +410,13 @@ Common heuristic ranges, not statistical significance tests:
 - Captures distributional shift on binned data.
 - Easy to compute and interpret.
 
-### Discrete and constant data
+### Binning
 
-The implementation uses one category bin per distinct value when there are few
-unique values, including binary PASS/FAIL. This avoids empty linear bins and
-still detects a shift from an all-PASS baseline to a mixed current window. If
-both windows contain the same single constant value, PSI is correctly zero. For
-continuous data it uses baseline-driven linear edges; a constant continuous
-baseline remains a limitation, so read PSI alongside Wasserstein and the
-older fixed-window tests rather than as an independent alert.
+The implementation computes PSI on the embedding axis with the most variance,
+using up to ten baseline quantile bins so skewed values do not break the
+calculation. When the baseline has fewer than three distinct bin edges (for
+example a constant value), it reports 0. Read PSI alongside the permutation
+test and centroid distance rather than as an independent alert.
 
 ---
 
@@ -459,14 +470,9 @@ When Monitor compares N eligible group/metric pairs, it applies BH to those N
 p-values together. The declared family is one reviewed comparison: every
 scored hypothesis that could alert in that look.
 
-If a future caller mixes binary and continuous windows, Fisher's-exact and
-Mann-Whitney p-values remain in that same family. They test different data types,
-but each is a valid null p-value for a simultaneously alertable hypothesis.
-Splitting the family by test implementation would make the correction change as
-data types change and would no longer match the product question, "which cells
-alerted in this run?" Today the production judge emits binary PASS/FAIL scores,
-so its scored drift path uses Fisher's exact throughout and the mixed-test
-distinction is normally inactive.
+Monitor accepts only boolean metrics and rejects continuous values, so every
+p-value in the family comes from Fisher's exact test. Continuous metrics would
+need a separately versioned statistical contract.
 
 For 50 eligible groups × 5 metrics = 250 tests at a **single-look** level of
 0.05, the rank-one cutoff is 0.0002, the rank-125 cutoff is 0.025, and the
@@ -609,7 +615,6 @@ These are different questions with different denominators and gates:
 | How much mass shifted in older analysis? | Wasserstein distance | ≥ 0; diagnostic |
 | Did binned proportions shift in older analysis? | PSI | Heuristic diagnostic, not a p-value |
 | I ran many tests — am I just getting false positives? | Benjamini-Hochberg correction | adjusted p-values |
-| Did judge evaluability deteriorate? | Deterministic UNCLEAR-rate gate | ≥15-point increase with total-n floor |
 | Do two raters agree after chance correction? | Gwet's AC1 | −1 to +1; the rubric-alignment workflow classifies its 95% CI bounds |
 
 The most important point: **p-value and effect size answer different questions and you need both**. p-value alone lets trivial differences trigger alarms with enough data. Effect size alone lets random fluctuations look meaningful. Use them together.
