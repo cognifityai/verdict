@@ -873,7 +873,7 @@ def test_adjacent_turn_review_previews_only_two_turns_in_large_run_and_saves_cit
     }
     assert result["dimensions"][0]["evidenceReferences"] == ["turn:turn-20", "turn:turn-21"]
     saved = ControlStore(url).history("local", "scoped_evaluation", result["resultId"])
-    assert saved[0]["payload"]["criterionDescriptions"] == result["criterionDescriptions"]
+    assert {item["name"]: item["description"] for item in saved[0]["payload"]["criteria"]} == result["criterionDescriptions"]
     queued = schedule_scoped_once(
         storage, storage_url=url, tenant="local",
         config={**config, "planFingerprint": preview["planFingerprint"]},

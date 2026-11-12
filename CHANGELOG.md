@@ -15,6 +15,11 @@ the product is refined.
   Runs with possibly incomplete events, including unfinished or unverified
   local histories, measure no event outcome; a new turn keeps a run open.
 - The comparison settings expose the minimum change that can raise an alert.
+- One explicitly approved bounded historical audit for small session, run, or
+  adjacent-turn selections, with separate original/retrospective assessments,
+  explicit aggregation and evidence authority, and recovery per finding.
+- Scoped evidence suitability disclosures preserve explicit capture provenance
+  and distinguish substantive content from summaries, counts, and references.
 
 ### Changed
 
@@ -23,6 +28,11 @@ the product is refined.
   rule out a tool call or that stopped at its output limit. Calls with a recorded provider error measure only
   `provider_error`. Each frozen cohort records its metric-definition version;
   monitors with an earlier reference require a new reviewed reference.
+- Judges use UNCLEAR for insufficient evidence and respect explicit writing
+  requirements. Malformed or contradictory structured replies are errors.
+  New prompt/parser identities keep earlier saved methodologies distinct.
+- Saved audit history remains immutable and the result API discloses stale
+  evidence separately. Citation linkage and exact quotes do not verify entailment.
 
 ### Fixed
 

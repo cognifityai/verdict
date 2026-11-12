@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { ScopedEvaluate } from "./ScopedEvaluate.jsx";
+import { EvidenceSuitability, ScopedEvaluate } from "./ScopedEvaluate.jsx";
 import { EvidenceExplain, UnverifiedAiResponse } from "./EvidenceExplain.jsx";
 
 const C = { panel: "#111715", border: "#26332e", sub: "#94a39d", faint: "#68766f", green: "#4ee1aa", bar: "#38b993", amber: "#f2b84b", red: "#ff6b6b" };
@@ -243,6 +243,7 @@ function SessionReport({ root, sessionId, sourceKind, onOpenRun }) {
       {report.turns?.length > 0 && <div><div className="font-semibold">Requests and outcomes</div>{report.turns.map((turn) => <details key={`${turn.runId}:${turn.turnId}`} className="border p-2 mt-2" style={{ borderColor: C.border }}><summary>{turn.startedAt} · {turn.runId} · turn {turn.sequence + 1} · {turn.status} · {count(turn.totalTokens)} tokens</summary><p className="mt-2 whitespace-pre-wrap break-words">Request: {turn.request || "Not captured"}</p><p className="mt-2 whitespace-pre-wrap break-words">Response: {turn.response || "Not captured"}</p></details>)}</div>}
       {report.events?.length > 0 && <details><summary>Recorded event timeline ({report.events.length}{report.coverage === "complete" ? "" : " shown; details in run"})</summary>{report.events.map((event) => <div key={`${event.runId}:${event.eventId}`} className="border p-2 mt-2" style={{ borderColor: C.border }}><span>{event.occurredAt} · {event.type} · {event.status} · {event.runId}</span>{report.coverage === "complete" && <pre className="whitespace-pre-wrap break-words text-xs mt-1">{JSON.stringify(event.attributes, null, 2)}</pre>}</div>)}</details>}
       {report.coverage === "complete" && report.scopedEvaluationEligible !== false && <ScopedEvaluate key={`${sourceKind}:${sessionId}`} root={root} scope="session" sessionId={sessionId} sourceKind={sourceKind} />}
+      <EvidenceSuitability suitability={report.scopedEvaluationSuitability} />
       <EvidenceExplain root={root} scope="session" sessionId={sessionId} sourceKind={sourceKind} />
       {report.scopedEvaluationEligible === false && <p className="text-xs" style={{ color: C.sub }}>Whole-session evaluation unavailable: {report.scopedEvaluationUnavailableReason?.replaceAll("_", " ") || "incomplete evidence"}. Open a run to inspect smaller evidence.</p>}
     </>}

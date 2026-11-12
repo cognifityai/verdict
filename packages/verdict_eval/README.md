@@ -37,18 +37,24 @@ Trace/Turn judge and conversation grading share. It finds the JSON inside a
 Markdown fence or surrounding prose and accepts the per-dimension results as
 an object keyed by dimension name, inside an outer `dimensions` object, or as
 a list of objects that carry `name`. It rejects duplicate keys, duplicate
-dimension names, non-finite numbers and replies over 64 KB. For trace and turn
-judging, a complete but malformed reply is normalized to `UNCLEAR` per
-dimension; conversation grading stores it as an `error` assessment with
-`invalid_judge_output`; a reply the provider
-cut off at the output ceiling, or an oversized one, raises
-`JudgeOutputUnusable` so callers record a retryable judge error. Conversation
+dimension names, non-finite numbers and replies over 64 KB. Missing or extra
+dimensions, contradictory reasons, multiple answers, invalid verdicts, and
+malformed replies raise `JudgeOutputError`; cut-off and oversized replies raise
+`JudgeOutputUnusable`. Callers record technical errors separately from semantic
+`UNCLEAR`. Scoped calls are never retried automatically. Conversation
 grading stores a finding's `issue` label in identifier form (words joined with
 underscores, lower-cased) and still requires each quoted finding to match the
 exact message at the stated 0-based position. The decoder's
 contract version is part of the evaluator identity (`evaluator_config`
 `output_contract`, and the conversation prompt version's suffix), so a decoder
 change never pools with earlier judgments.
+
+The judge respects explicit length, style, and formatting requirements.
+Insufficient evidence is `UNCLEAR`; demonstrated violations may `FAIL`, including
+omissions from a complete actual answer. Scoped sessions, runs, and adjacent turns
+also offer one optional historical audit with separate original/retrospective
+assessments and per-finding recovery. See the
+[evidence and audit contract](../../docs/EVALUATION_RELIABILITY.md).
 
 `Judge.max_tokens` (default 1024) is the answer budget. For models that think
 by default (Claude Fable, Mythos, Opus 5 and Sonnet 5 families; OpenAI `gpt-5`,

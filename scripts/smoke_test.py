@@ -144,11 +144,17 @@ judge2 = Judge(provider=FakeProvider(payload_fenced), model="fake-judge")
 j2 = judge2.judge(query="Q", response="R")
 assert j2.pass_count == 5
 
-# Missing dimension → UNCLEAR
+# Missing dimension is a technical error, distinct from semantic UNCLEAR.
+from verdict_eval.judge_output import JudgeOutputError
+
 judge3 = Judge(provider=FakeProvider('{"groundedness": {"reasoning": "r", "verdict": "PASS"}}'),
                model="fake-judge")
-j3 = judge3.judge(query="Q", response="R")
-assert any(d.verdict == Verdict.UNCLEAR for d in j3.dimensions)
+try:
+    judge3.judge(query="Q", response="R")
+except JudgeOutputError:
+    pass
+else:
+    raise AssertionError("missing judge dimension accepted")
 print("✓ judge (single)")
 
 # Ensemble majority vote

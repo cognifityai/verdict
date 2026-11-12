@@ -11,7 +11,7 @@ from typesafe_sdk.constants import DEFAULT_BASE_URL
 from verdict.schema import Verdict
 from verdict_eval.cli.pipeline import build_parser, main
 from verdict_eval.jev_judge import JevJudge
-from verdict_eval.judge import DEFAULT_RUBRIC
+from verdict_eval.judge import DEFAULT_RUBRIC, Rubric, RubricDimension
 
 
 def _wire_judge(monkeypatch, *, labels=None, response_model="jev-1.13.0"):
@@ -74,6 +74,20 @@ def test_jev_choice_labels_become_complete_verdict_judgment(monkeypatch):
     assert all(score.reasoning == "" for score in judgment.dimensions)
     assert requests[0]["state"]["retrieved_context"] == "Refunds within 30 days."
     assert set(requests[0]["questions"]) == set(judgment.expected_dimensions)
+
+
+def test_jev_transmits_rubric_formatting_and_insufficient_evidence_contract(monkeypatch):
+    requests = _wire_judge(monkeypatch, labels={"presentation": "unclear"})
+    rubric = Rubric("writing", "1", (RubricDimension(
+        "presentation", "FAIL unless the answer uses a Markdown table.",
+    ),))
+    result = JevJudge(rubric=rubric).judge(query="Describe the supplied items", response="Capture unavailable")
+    sent = requests[0]["questions"]["presentation"]["instructions"]
+    assert "Respect explicit rubric and user requirements" in sent
+    assert "insufficient evidence" in sent
+    assert "unless the user requested a format" not in sent
+    assert "FAIL unless the answer uses a Markdown table." in sent
+    assert result.dimensions[0].verdict is Verdict.UNCLEAR
 
 
 @pytest.mark.parametrize("labels,model", [

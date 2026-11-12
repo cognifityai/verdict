@@ -893,8 +893,11 @@ def build_agent_session_bundle(
     scoped_evidence = session_projection_from_report(
         redacted, session_id=session_id, source_kind=source_kind,
     )
-    redacted["scopedEvaluationEligible"] = scoped_evidence["coverage"] == "complete"
-    redacted["scopedEvaluationUnavailableReason"] = scoped_evidence["unavailableReason"]
+    redacted["scopedEvaluationEligible"] = (scoped_evidence["coverage"] == "complete"
+                                           and scoped_evidence["suitability"]["state"] != "unavailable")
+    redacted["scopedEvaluationUnavailableReason"] = (scoped_evidence["unavailableReason"]
+                                                    or scoped_evidence["suitability"]["unavailableReason"])
+    redacted["scopedEvaluationSuitability"] = scoped_evidence["suitability"]
     return redacted
 
 
@@ -1233,8 +1236,11 @@ def build_agent_runs_bundle(
                         max((turn.sequence for turn in bundle.turns), default=-1), None,
                     ),
                 ),
-                "scopedEvaluationEligible": scoped_evidence["coverage"] == "complete",
-                "scopedEvaluationUnavailableReason": scoped_evidence["unavailableReason"],
+                "scopedEvaluationEligible": (scoped_evidence["coverage"] == "complete"
+                                             and scoped_evidence["suitability"]["state"] != "unavailable"),
+                "scopedEvaluationUnavailableReason": (scoped_evidence["unavailableReason"]
+                                                       or scoped_evidence["suitability"]["unavailableReason"]),
+                "scopedEvaluationSuitability": scoped_evidence["suitability"],
             })
             linked_trace_ids[bundle.run.run_id].update(
                 event.trace_id for event in bundle.events if event.trace_id is not None
