@@ -398,3 +398,7 @@ The continuous worker polls for saved plan changes every 30 seconds. Pausing the
 ## Privacy and support boundaries
 
 Prompts, tool outputs, and judge replies are untrusted content. Verdict applies bounded, best-effort redaction before storage and before a scoped external preview. Review the exact preview before egress. Do not put credentials, customer traces, or private paths into saved case sets or screenshots. Explicit application-agent capture supports Python SDK contexts and existing documented transports; Claude Code/Codex are the first automatic local-history imports. No universal task correctness, automatic token savings, multi-agent causal attribution, or automatic connector support is implied.
+
+See [bounded evaluation reliability](EVALUATION_RELIABILITY.md) for PASS/FAIL/UNCLEAR versus execution
+errors, producer-declared content suitability, and the optional single-call
+historical audit with separate original assessments and finding-specific recovery.

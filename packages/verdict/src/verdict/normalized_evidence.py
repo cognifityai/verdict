@@ -629,6 +629,16 @@ def merge_agent_turn(
             if response == current.final_response_redacted != incoming.final_response_redacted
             else current.response_truncated or incoming.response_truncated
         ),
+        request_content_kind=_fill_optional(
+            None if current.request_content_kind == "unknown" else current.request_content_kind,
+            None if incoming.request_content_kind == "unknown" else incoming.request_content_kind,
+            subject="request content kind",
+        ) or "unknown",
+        response_content_kind=_fill_optional(
+            None if current.response_content_kind == "unknown" else current.response_content_kind,
+            None if incoming.response_content_kind == "unknown" else incoming.response_content_kind,
+            subject="response content kind",
+        ) or "unknown",
         progress_redacted=(
             incoming.progress_redacted
             if replace_progress and incoming.progress_redacted is not None
@@ -868,6 +878,8 @@ def agent_turn_from_row(row: Mapping[str, object]) -> AgentTurn:
             if row["final_response_redacted"] is not None
             else None
         ),
+        request_content_kind=str(row.get("request_content_kind") or "unknown"),
+        response_content_kind=str(row.get("response_content_kind") or "unknown"),
         request_state=EvidenceState(str(row["request_state"])),
         response_state=EvidenceState(str(row["response_state"])),
         progress_redacted=(str(row["progress_redacted"])

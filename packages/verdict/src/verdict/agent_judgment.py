@@ -162,6 +162,7 @@ def turn_evidence_fingerprint(turn: AgentTurn, tool_counts: TurnToolCounts | Non
     payload = [
         turn.status.value, turn.request_state.value, turn.response_state.value,
         turn.user_request_redacted, turn.final_response_redacted,
+        turn.request_content_kind, turn.response_content_kind,
         turn.request_truncated, turn.response_truncated,
     ]
     if tool_counts is not None:
@@ -181,6 +182,8 @@ def turn_evidence_fingerprint(turn: AgentTurn, tool_counts: TurnToolCounts | Non
 
 
 def turn_evidence_reason(turn: AgentTurn) -> str | None:
+    if any(kind not in {"unknown", "substantive"} for kind in (turn.request_content_kind, turn.response_content_kind)):
+        return "substantive_task_or_output_unavailable"
     if turn.status is not ExecutionStatus.COMPLETED:
         return "turn_not_completed"
     if turn.request_truncated or turn.response_truncated:

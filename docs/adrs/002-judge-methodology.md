@@ -17,19 +17,18 @@ default rubric is binary PASS/FAIL per dimension and covers groundedness,
 relevance, completeness, safety, and instruction following. Binary dimensions
 are easier to calibrate and compare than broad numeric scales.
 
-PASS rate is `PASS / (PASS + FAIL)`. `UNCLEAR`, missing dimensions, malformed
-output normalized to `UNCLEAR`, and judge errors are coverage states and do not
+PASS rate is `PASS / (PASS + FAIL)`. `UNCLEAR`, missing judgments, and
+judge errors are coverage states and do not
 enter the denominator. No scored values means unavailable, not zero percent.
 
 Every judge path decodes replies through one shared decoder
 (`verdict_eval.judge_output`). It accepts the reply's JSON inside a Markdown
 fence or prose and the per-dimension results as an object keyed by name or as
 a list of named objects, and it rejects duplicate keys, duplicate dimension
-names, and non-finite numbers. For trace and turn judging, a reply that is
-complete but malformed is normalized to `UNCLEAR` per dimension, while
-conversation grading records it as an `invalid_judge_output` error; a reply that is not a judgment at all,
-because the provider stopped at the output ceiling or it is oversized, is a
-retryable judge error. The decoder's contract version is part of every
+names, and non-finite numbers. Malformed or contradictory replies, missing dimensions, truncated replies,
+and oversized replies are technical judge errors across trace, turn, and
+conversation evaluation. UNCLEAR is reserved for insufficient evidence or
+inapplicability. Scoped calls never retry automatically. The decoder's contract version is part of every
 evaluator identity, because a different decoder turns the same provider text
 into a different judgment. Adapters send the judge's output budget plus a
 fixed reasoning allowance so models with built-in thinking can answer.
@@ -96,3 +95,8 @@ does not guarantee unchanged behavior outside the set.
 - Panickssery et al. 2024, "LLM Evaluators Recognize and Favor Their Own
   Generations," arXiv:2404.18796
 - Tan et al. 2024, "JudgeBench," arXiv:2410.12784
+
+Historical audit uses a separate strict one-object structured reply and explicit
+per-dimension aggregation and evidence authority. See
+[bounded evaluation reliability](../EVALUATION_RELIABILITY.md) for the current
+contract, provenance disclosure, and citation limits.

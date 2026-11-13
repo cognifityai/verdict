@@ -264,8 +264,10 @@ def test_dimension_fields_normalize_verdict_reason_and_findings() -> None:
     assert fields.score is None
 
 
-def test_dimension_fields_prefers_reason_over_reasoning_and_accepts_scalars() -> None:
-    assert dimension_fields({"reason": "a", "reasoning": "b"}).reason == "a"
+def test_dimension_fields_accepts_consistent_aliases_and_scalars() -> None:
+    assert dimension_fields({"reason": "a", "reasoning": "a"}).reason == "a"
+    with pytest.raises(JudgeOutputError, match="contradictory"):
+        dimension_fields({"reason": "a", "reasoning": "b"})
     assert dimension_fields({"verdict": True}).verdict == "TRUE"
     assert dimension_fields({"reason": 4}).reason == "4"
     assert dimension_fields({"findings": None}).findings == []

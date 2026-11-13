@@ -88,9 +88,12 @@ class AgentEventType(str, Enum):
     OUTCOME = "outcome"
 
 
+CONTENT_KINDS = frozenset({"unknown", "substantive", "summary", "counts", "references", "completion_summary"})
+
+
 _EVENT_FIELDS: dict[AgentEventType, frozenset[str]] = {
     AgentEventType.INSTRUCTION: frozenset({"name", "text", "source", "available"}),
-    AgentEventType.CONTEXT: frozenset({"name", "text", "value", "source", "available"}),
+    AgentEventType.CONTEXT: frozenset({"name", "text", "value", "source", "available", "content_kind"}),
     AgentEventType.MODEL_CALL: frozenset(
         {
             "provider",
@@ -107,7 +110,7 @@ _EVENT_FIELDS: dict[AgentEventType, frozenset[str]] = {
     AgentEventType.TOOL_CALL: frozenset(
         {"tool_name", "arguments", "call_id", "tool_origin"}
     ),
-    AgentEventType.TOOL_RESULT: frozenset({"tool_name", "result", "call_id", "is_error"}),
+    AgentEventType.TOOL_RESULT: frozenset({"tool_name", "result", "call_id", "is_error", "content_kind"}),
     AgentEventType.COMMAND: frozenset({"command", "cwd_hash", "exit_code", "stdout", "stderr", "check_id_hash"}),
     AgentEventType.TEST_RESULT: frozenset(
         {"command", "exit_code", "passed", "failed", "skipped", "output", "check_id_hash"}
@@ -158,6 +161,7 @@ _TEXT_FIELDS = frozenset(
         "child_run_id",
         "reason",
         "kind",
+        "content_kind",
     }
 )
 _BOOLEAN_FIELDS = frozenset({"available", "is_error", "authoritative"})
@@ -249,6 +253,8 @@ def _bounded_json_value(value: Any, *, depth: int, seen: set[int], nodes: list[i
 def _validate_attributes(event_type: AgentEventType, attributes: dict[str, Any]) -> None:
     if not isinstance(attributes, dict):
         raise ValueError("event attributes must be an object")
+    if "content_kind" in attributes and attributes["content_kind"] not in CONTENT_KINDS:
+        raise ValueError("invalid content_kind")
     unexpected = set(attributes) - _EVENT_FIELDS[event_type]
     if unexpected:
         raise ValueError(
@@ -387,8 +393,13 @@ class AgentTurn:
     request_truncated: bool = False
     response_truncated: bool = False
     progress_redacted: str | None = None
+    request_content_kind: str = "unknown"
+    response_content_kind: str = "unknown"
 
     def __post_init__(self) -> None:
+        for name in ("request_content_kind", "response_content_kind"):
+            if getattr(self, name) not in CONTENT_KINDS:
+                raise ValueError(f"invalid {name}")
         for name in ("turn_id", "run_id"):
             _validate_text(getattr(self, name), field_name=name, maximum=_MAX_IDENTIFIER_BYTES)
         if (
@@ -818,6 +829,8 @@ def _agent_capture_from_json(
         "request_truncated",
         "response_truncated",
         "progress_redacted",
+        "request_content_kind",
+        "response_content_kind",
     }
     event_fields = {
         "event_id",
@@ -895,6 +908,8 @@ def _agent_capture_from_json(
                 request_truncated=item.get("request_truncated", False),
                 response_truncated=item.get("response_truncated", False),
                 progress_redacted=item.get("progress_redacted"),
+                request_content_kind=item.get("request_content_kind", "unknown"),
+                response_content_kind=item.get("response_content_kind", "unknown"),
             )
             for item in turn_data
             if isinstance(item, dict)

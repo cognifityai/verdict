@@ -19,7 +19,7 @@ import json
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
-OUTPUT_CONTRACT_VERSION = "judge_output_v2"
+OUTPUT_CONTRACT_VERSION = "judge_output_v3"
 MAX_OUTPUT_BYTES = 64_000
 _MAX_CANDIDATE_STARTS = 64
 _TRUNCATED_FINISH_REASONS = frozenset({"LENGTH", "MAX_TOKENS"})
@@ -177,6 +177,8 @@ def dimension_fields(item: object) -> DimensionFields:
         if not isinstance(verdict, _SCALARS):
             raise JudgeOutputError("judge verdict must be text")
         verdict = str(verdict).strip().upper()
+    if all(item.get(k) is not None for k in _REASON_KEYS) and str(item["reason"]).strip() != str(item["reasoning"]).strip():
+        raise JudgeOutputError("contradictory judge reasons")
     reason = ""
     for key in _REASON_KEYS:
         if item.get(key) is not None:

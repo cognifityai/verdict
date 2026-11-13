@@ -4625,7 +4625,7 @@ test("scoped evaluation requires an exact preview and new approval after criteri
   tree = render(ui.ScopedEvaluate, hooks, props);
   const runButton = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation"))[0];
   assert.equal(runButton().props.disabled, true);
-  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+  findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === "Approve one judge call")[0]
     .props.onChange({ target: { checked: true } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.equal(runButton().props.disabled, false);
@@ -4676,7 +4676,7 @@ test("direct scoped approval sends the chosen static estimate limit", async () =
   tree = render(ui.ScopedEvaluate, hooks, props);
   const budget = () => findAll(tree, (node) => node.type === "input" && node.props.type === "number")[0];
   const run = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation"))[0];
-  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+  findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === "Approve one judge call")[0]
     .props.onChange({ target: { checked: true } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   budget().props.onChange({ target: { value: "0.005" } });
@@ -4956,7 +4956,7 @@ test("session behavior focus changes the reviewed rubric and invalidates old app
   await previewing;
   await resolveJson(requests[3], { jobs: [] });
   tree = render(ui.ScopedEvaluate, hooks, props);
-  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0].props.onChange({ target: { checked: true } });
+  findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === "Approve one judge call")[0].props.onChange({ target: { checked: true } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation"))[0].props.disabled, false);
   findAll(tree, (node) => node.type === "select" && node.props["aria-label"] === "Review focus")[0].props.onChange({ target: { value: "correction" } });
@@ -4989,7 +4989,7 @@ test("one-time scheduled evaluation requires a visible budget and persistent con
   tree = render(ui.ScopedEvaluate, hooks, props);
   const queue = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Queue one evaluation"))[0];
   assert.equal(queue().props.disabled, true);
-  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[1]
+  findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === "Approve one scheduled judge call")[0]
     .props.onChange({ target: { checked: true } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.equal(queue().props.disabled, false);
@@ -5006,7 +5006,7 @@ test("one-time scheduled evaluation requires a visible budget and persistent con
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.match(textOf(tree), /Scheduled approval:\s+cancelled/);
   assert.equal(queue().props.disabled, true, "requeue requires fresh consent");
-  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[1]
+  findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === "Approve one scheduled judge call")[0]
     .props.onChange({ target: { checked: true } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   const requeuing = queue().props.onClick();

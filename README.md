@@ -187,3 +187,7 @@ python scripts/smoke_test.py
 ```
 
 See [contributing](CONTRIBUTING.md), [architecture decisions](docs/adrs/), and [evaluation documentation](packages/verdict_eval/README.md). Apache 2.0.
+
+See [bounded evaluation reliability](docs/EVALUATION_RELIABILITY.md) for PASS/FAIL/UNCLEAR versus execution
+errors, producer-declared content suitability, and the optional single-call
+historical audit with separate original assessments and finding-specific recovery.

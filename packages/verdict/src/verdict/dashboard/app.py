@@ -798,6 +798,8 @@ def build_agent_session_bundle(
                               "status": turn.status.value,
                               "request": turn.user_request_redacted,
                               "response": turn.final_response_redacted,
+                              "requestContentKind": turn.request_content_kind,
+                              "responseContentKind": turn.response_content_kind,
                               "requestState": turn.request_state.value,
                               "responseState": turn.response_state.value,
                               "requestTruncated": turn.request_truncated,

@@ -686,7 +686,7 @@ def test_large_and_partial_runs_are_not_sent_to_judge(tmp_path):
 
 
 @pytest.mark.parametrize("scope", ["run", "session"])
-def test_oversized_scope_returns_original_limit_before_redaction(tmp_path, monkeypatch, scope):
+def test_oversized_scope_preserves_limit_and_discloses_no_content(tmp_path, scope):
     path = tmp_path / f"oversized-{scope}.db"
     storage = SQLiteStorage(str(path))
     bundle = _bundle()
@@ -697,10 +697,6 @@ def test_oversized_scope_returns_original_limit_before_redaction(tmp_path, monke
                    for index in range(81))
     storage.replace_agent_run_bundle(replace(bundle, turns=turns, events=events))
 
-    def forbidden_redaction(*_args, **_kwargs):
-        raise AssertionError("oversized evidence reached scoped redaction")
-
-    monkeypatch.setattr(scoped_evaluation, "redact_structure", forbidden_redaction)
     config = _config()
     if scope == "session":
         config = {**config, "scope": "session", "sessionId": "source-local",

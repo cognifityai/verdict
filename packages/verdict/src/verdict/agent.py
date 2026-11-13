@@ -448,13 +448,19 @@ class ToolContext:
         if origin is not None and not isinstance(origin, ToolOrigin):
             raise ValueError("tool origin must be a ToolOrigin or None")
         self._origin = origin
+        self._content_kind = "unknown"
         self._output: object = None
         self._entered = False
         self._closed = False
 
-    def set_output(self, output: object) -> None:
+    def set_output(self, output: object, *, content_kind: str = "unknown") -> None:
         if not self._entered or self._closed:
             raise RuntimeError("tool output requires an active tool context")
+        from verdict.evidence import CONTENT_KINDS
+
+        if content_kind not in CONTENT_KINDS:
+            raise ValueError("invalid tool output content kind")
+        self._content_kind = content_kind
         self._output = output
 
     def __enter__(self) -> ToolContext:
@@ -491,6 +497,7 @@ class ToolContext:
                 "result": output,
                 "call_id": self._call_id,
                 "is_error": exc is not None,
+                **({"content_kind": self._content_kind} if self._content_kind != "unknown" and exc is None else {}),
             },
             status=_terminal_status(exc),
         )
@@ -505,10 +512,16 @@ class ToolContext:
 
 
 class TurnContext:
-    def __init__(self, owner: AgentRunContext, user_input: object) -> None:
+    def __init__(self, owner: AgentRunContext, user_input: object, *, content_kind: str = "unknown") -> None:
         if not isinstance(user_input, str):
             raise ValueError("agent turn user_input must be text")
         self._owner = owner
+        from verdict.evidence import CONTENT_KINDS
+
+        if content_kind not in CONTENT_KINDS:
+            raise ValueError("invalid request content kind")
+        self._request_content_kind = content_kind
+        self._response_content_kind = "unknown"
         self._user_input = user_input
         self._state: _TurnState
         self._token: contextvars.Token[_TurnState | None] | None = None
@@ -530,6 +543,7 @@ class TurnContext:
             started_at=started_at,
             status=ExecutionStatus.UNKNOWN,
             user_request_redacted=request,
+            request_content_kind=self._request_content_kind,
             request_state=(
                 EvidenceState.PRESENT if request is not None else EvidenceState.NOT_CAPTURED
             ),
@@ -555,6 +569,7 @@ class TurnContext:
             status=_terminal_status(exc),
             ended_at=_utcnow(),
             final_response_redacted=response,
+            response_content_kind=self._response_content_kind,
             response_state=(
                 EvidenceState.PRESENT
                 if response is not None
@@ -572,10 +587,15 @@ class TurnContext:
     async def __aexit__(self, exc_type: object, exc: BaseException | None, tb: object) -> bool:
         return self.__exit__(exc_type, exc, tb)
 
-    def set_output(self, output: object) -> None:
+    def set_output(self, output: object, *, content_kind: str = "unknown") -> None:
         self._require_active()
         if not isinstance(output, str):
             raise ValueError("agent turn output must be text")
+        from verdict.evidence import CONTENT_KINDS
+
+        if content_kind not in CONTENT_KINDS:
+            raise ValueError("invalid response content kind")
+        self._response_content_kind = content_kind
         self._output = output
         self._has_output = True
 
@@ -626,12 +646,14 @@ class TurnContext:
         value: object,
         source: str = "application",
         available: bool = True,
+        content_kind: str = "unknown",
     ) -> None:
         if not isinstance(name, str) or not name:
             raise ValueError("context name must be non-empty text")
         self._record(
             AgentEventType.CONTEXT,
-            {"name": name, "value": value, "source": source, "available": available},
+            {"name": name, "value": value, "source": source, "available": available,
+             **({"content_kind": content_kind} if content_kind != "unknown" else {})},
         )
 
     def record_command(
@@ -867,9 +889,9 @@ class AgentRunContext:
     async def __aexit__(self, exc_type: object, exc: BaseException | None, tb: object) -> bool:
         return self.__exit__(exc_type, exc, tb)
 
-    def turn(self, *, user_input: object) -> TurnContext:
+    def turn(self, *, user_input: object, content_kind: str = "unknown") -> TurnContext:
         self._require_active()
-        return TurnContext(self, user_input)
+        return TurnContext(self, user_input, content_kind=content_kind)
 
     def _require_active(self) -> None:
         if not self._open or _active_run.get() is not self:

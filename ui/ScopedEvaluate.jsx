@@ -12,6 +12,9 @@ const REVIEW_CHECKS = {
 const UNAVAILABLE = {
   source_capture_partial: "Events after the capture limit may be missing from this run. Inspect the two recorded Turns locally; this pair cannot support a complete behavior judgment.",
   evidence_limit: "This pair exceeds the bounded review context. Inspect the recorded Turns locally; no judge request can be made for this selection.",
+  identifier_requires_redaction: "A source identifier cannot be safely preserved for review. Use opaque producer identifiers before evaluating this selection.",
+  substantive_task_or_output_unavailable: "The producer declared a summary, count, references, or completion summary instead of a substantive task or answer.",
+  required_source_evidence_unavailable: "This check requires substantive recorded sources that are unavailable in this capture.",
   turn_content_partial: "A request or answer in this pair is incomplete. If the prior answer and both requests are recorded, a separate text-only check may still be available.",
 };
 
@@ -24,6 +27,10 @@ export function ScopedEvaluate({ root, scope, runId = null, turnId = null, event
   const [model, setModel] = useState(DEFAULT_MODELS.anthropic);
   const [reviewFocus, setReviewFocus] = useState(scope === "turn_window" ? "correction" : "task_completion");
   const [textOnly, setTextOnly] = useState(false);
+  const [historical, setHistorical] = useState(false);
+  const [aggregation, setAggregation] = useState("final_turn");
+  const [authority, setAuthority] = useState("public_knowledge");
+  const [auditBudget, setAuditBudget] = useState(4096);
   const [criterion, setCriterion] = useState(scope === "tool_action"
     ? "Given the recorded task and available tool contract, did the selected tool and arguments fit? Successful execution alone is insufficient."
     : REVIEW_CHECKS[scope === "turn_window" ? "correction" : "task_completion"].description);
@@ -49,9 +56,10 @@ export function ScopedEvaluate({ root, scope, runId = null, turnId = null, event
   const effectiveScope = scope === "turn_window" && textOnly ? "followup_text" : scope;
   const config = { scope: effectiveScope, ...(runId ? { runId } : {}), ...(turnId ? { turnId } : {}), ...(eventId ? { eventId } : {}),
     ...(sessionId ? { sessionId, sourceKind } : {}), provider, model,
-    maxOutputTokens: 256,
+    maxOutputTokens: historical ? auditBudget : 256,
+    ...(historical ? { auditMode: "historical" } : {}),
     ...(textOnly && scope === "turn_window" ? {} : { rubric: { name: scope === "tool_action" ? "tool_review" : scope === "session" ? "session_review" : scope === "turn_window" ? "adjacent_turn_review" : "run_review", version: "1",
-      dimensions: [{ name: scope === "tool_action" ? "tool_fit" : reviewFocus === "custom" ? "custom_review" : reviewFocus, description: criterion }] },
+      dimensions: [{ name: scope === "tool_action" ? "tool_fit" : reviewFocus === "custom" ? "custom_review" : reviewFocus, description: criterion, ...(historical ? { aggregation, evidenceAuthority: authority } : {}) }] },
     }),
   };
   const key = JSON.stringify(config);
@@ -75,6 +83,19 @@ export function ScopedEvaluate({ root, scope, runId = null, turnId = null, event
     <button type="button" className="border px-3 py-2" onClick={() => setOpen((value) => !value)}>{open ? "Hide evaluation" : scope === "run" ? "Evaluate this run…" : scope === "session" ? "Evaluate this session…" : scope === "turn_window" ? "Review this turn and prior answer…" : "Evaluate tool action…"}</button>
     {open && <div className="border p-3 mt-2 space-y-3" style={{ borderColor: C.border }}>
       <p style={{ color: C.sub }}>Optional external judge. Analyze and recorded findings remain available without a provider key. No evidence is sent until you review and approve the preview.</p>
+      {["run", "session", "turn_window"].includes(scope) && !textOnly && <div className="space-y-2">
+        <label className="flex gap-2"><input aria-label="Historical audit" type="checkbox" checked={historical} onChange={(event) => { setHistorical(event.target.checked); setConfirmed(false); }} />Historical audit in one bounded judge call</label>
+        {historical && <>
+          <p>Original-response and retrospective assessments stay separate. Earlier factual failures remain visible after recovery. Judge support remains unverified.</p>
+          <label>Aggregation meaning<select aria-label="Aggregation meaning" className="block border p-2 w-full bg-transparent" value={aggregation} onChange={(event) => setAggregation(event.target.value)}>
+            <option value="historical_no_errors">No material factual errors anywhere in history</option><option value="final_turn">Final task completion</option><option value="holistic">Holistic quality of the selected work</option>
+          </select></label>
+          <label>Evidence authority<select aria-label="Evidence authority" className="block border p-2 w-full bg-transparent" value={authority} onChange={(event) => setAuthority(event.target.value)}>
+            <option value="public_knowledge">Recorded evidence and well-established public knowledge</option><option value="recorded_sources">Recorded sources required for factual findings</option>
+          </select></label>
+          <label>Audit output token allowance<input aria-label="Audit output token allowance" className="block border p-2 bg-transparent" type="number" min="512" max="32768" value={auditBudget} onChange={(event) => setAuditBudget(Number(event.target.value))} /></label>
+        </>}
+      </div>}
       {scope === "turn_window" && <p style={{ color: C.sub }}>{textOnly ? "Only the two recorded Turns and the prior answer are reviewed. Typed events and later agent work are excluded; this cannot establish agent fault or task success." : "Only these two recorded turns are reviewed. This does not assess the surrounding run or prove the agent was silent."}</p>}
       <div className="grid sm:grid-cols-2 gap-2"><label>Provider<select className="block border p-2 mt-1 w-full bg-transparent" value={provider} onChange={(event) => { const next = event.target.value; setProvider(next); setModel(DEFAULT_MODELS[next]); setConfirmed(false); }}><option value="anthropic">Anthropic</option><option value="openai">OpenAI / compatible</option><option value="google">Google</option></select></label><label>Judge model<input className="block border p-2 mt-1 w-full bg-transparent" value={model} onChange={(event) => { setModel(event.target.value); setConfirmed(false); }} /></label></div>
       {scope !== "tool_action" && !textOnly && <label>Review focus<select aria-label="Review focus" className="block border p-2 mt-1 w-full bg-transparent" value={reviewFocus} onChange={(event) => { const next = event.target.value; setReviewFocus(next); if (REVIEW_CHECKS[next]) setCriterion(REVIEW_CHECKS[next].description); setConfirmed(false); }}>
@@ -85,14 +106,18 @@ export function ScopedEvaluate({ root, scope, runId = null, turnId = null, event
       {environment?.evalPackageAvailable === false && <p role="status" style={{ color: C.amber }}>Install the optional cognifity-verdict-eval package in this dashboard's Python environment to use judge reviews. Local analysis remains available.</p>}
       <button type="button" className="border px-3 py-2" disabled={!auth || busy || environment?.evalPackageAvailable === false} onClick={async () => { const sequence = ++previewSequence.current; const data = await post("/api/scoped/preview", config); if (data && sequence === previewSequence.current) { setPreview(data); setPreviewKey(key); setConfirmed(false); setScheduleConfirmed(false); setScheduledJob(null); setResult(data.savedResult || null); if (data.plannedCalls === 1) fetch(`${root}/api/scoped/scheduled`, { credentials: "same-origin" }).then((response) => response.ok ? response.json() : null).then((jobs) => { if (sequence === previewSequence.current) setScheduledJob(jobs?.jobs?.find((item) => item.planFingerprint === data.planFingerprint) || null); }).catch(() => {}); } }}>Preview bounded evidence or reopen saved review</button>
       {preview && <div className="border p-3" style={{ borderColor: C.border }}>
+        <p>Structural capture coverage: {preview.coverage}. Evaluation suitability: {preview.evaluationSuitability?.state || "unknown"}.</p>
+        <p style={{ color: C.sub }}>{preview.evaluationSuitability?.limitations?.join("; ")}</p>
+        {preview.plannedCalls !== 1 && <details><summary>Review captured provenance</summary><pre className="whitespace-pre-wrap break-words max-h-72 overflow-auto">{JSON.stringify(preview.evaluationSuitability, null, 2)}</pre></details>}
         {preview.plannedCalls !== 1 ? <p role="status" style={{ color: C.amber }}>{Object.hasOwn(UNAVAILABLE, preview.unavailableReason) ? UNAVAILABLE[preview.unavailableReason] : "This selection has incomplete evidence. Inspect the recorded facts locally or choose another scope."} No evidence was sent.</p> : <>
-        <p>{preview.evidencePreview?.coverageBasis === "recorded_text_only" ? "Recorded text only · source events may be incomplete" : "Complete bounded scope"} · {preview.provider}/{preview.model}</p>
+        <p>{preview.evidencePreview?.coverageBasis === "recorded_text_only" ? "Recorded text only · source events may be incomplete" : "Structurally complete bounded scope"} · {preview.provider}/{preview.model}</p>
+        <p>One call · maximum output {preview.maximumOutputTokens} tokens · method {preview.audit?.method || preview.promptVersion}</p>
         <p style={{ color: C.sub }}>Destination: {preview.destination}. Conservative static list-price bound: {preview.upperStaticListPriceUsd == null ? "unavailable" : `$${preview.upperStaticListPriceUsd.toFixed(4)}`}; actual billing may differ.</p>
         <details className="mt-2"><summary>Review exact redacted evidence</summary><pre className="whitespace-pre-wrap break-words max-h-72 overflow-auto mt-2">{JSON.stringify(preview.evidencePreview, null, 2)}</pre></details>
         {!current && <p style={{ color: C.amber }}>The selection or check changed. Preview again.</p>}
         {preview.savedResult ? <p role="status" style={{ color: C.green }}>Saved review for this exact evidence and check. No new judge call is needed.</p> : <>
         <label>Maximum approved static estimate (USD)<input className="block border p-2 mt-1 w-32 bg-transparent" type="number" min="0.001" max="100" step="0.001" value={estimateLimit} onChange={(event) => setEstimateLimit(event.target.value)} /></label>
-        <label className="flex gap-2 mt-3"><input type="checkbox" disabled={!current || preview.plannedCalls !== 1} checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />I approve sending this exact bounded evidence and check to {preview.destination} for one judge call.</label>
+        <label className="flex gap-2 mt-3"><input aria-label="Approve one judge call" type="checkbox" disabled={!current || preview.plannedCalls !== 1} checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />I approve sending this exact bounded evidence and check to {preview.destination} for one judge call.</label>
         <button type="button" className="border px-3 py-2 mt-2" disabled={!current || !confirmed || !configured || !withinEstimateLimit || busy || preview.plannedCalls !== 1} onClick={async () => { const data = await post("/api/scoped/run", { ...config, planFingerprint: preview.planFingerprint, maxEstimatedUsd: approvedEstimate, confirmExternalEgress: true }); if (data) setResult(data); }}>Run evaluation</button>
         {!configured && <p style={{ color: C.amber }}>Provider key is not configured for this dashboard process.</p>}
         </>}
@@ -101,20 +126,43 @@ export function ScopedEvaluate({ root, scope, runId = null, turnId = null, event
           {!preview.savedResult && <>
             <p style={{ color: C.sub }}>The exact evidence and check above are authorized once. If evidence changes before the worker runs, the approval is cancelled. An interrupted or timed-out attempt is never retried automatically.</p>
             <p>Conservative static list-price bound: {preview.scheduledUpperStaticListPriceUsd == null ? "unavailable" : `$${preview.scheduledUpperStaticListPriceUsd.toFixed(4)}`}. Actual provider billing may differ.</p>
-            <label className="flex gap-2"><input type="checkbox" checked={scheduleConfirmed} onChange={(event) => setScheduleConfirmed(event.target.checked)} />I authorize this exact evidence and check to be sent to {preview.destination} once during a later local service cycle, within the static estimate limit above.</label>
+            <label className="flex gap-2"><input aria-label="Approve one scheduled judge call" type="checkbox" checked={scheduleConfirmed} onChange={(event) => setScheduleConfirmed(event.target.checked)} />I authorize this exact evidence and check to be sent to {preview.destination} once during a later local service cycle, within the static estimate limit above.</label>
             {scheduledJob?.state !== "pending" && <button type="button" className="border px-3 py-2" disabled={!scheduleConfirmed || busy || !withinEstimateLimit} onClick={async () => { const data = await post("/api/scoped/schedule", { ...config, planFingerprint: preview.planFingerprint, maxEstimatedUsd: approvedEstimate, confirmPersistentExternalEgress: true }); if (data) { setScheduledJob(data); setScheduleConfirmed(false); } }}>Queue one evaluation</button>}
           </>}
           {scheduledJob && <div role="status">Scheduled approval: {scheduledJob.state}{scheduledJob.outcome ? ` · ${scheduledJob.outcome.replaceAll("_", " ")}` : ""}{scheduledJob.resultId ? ` · saved result ${scheduledJob.resultId.slice(0, 12)}` : ""}{scheduledJob.error ? ` · ${scheduledJob.error}` : ""}. {scheduledJob.resultId && <button type="button" className="underline ml-2" onClick={async () => { try { const response = await fetch(`${root}/api/scoped/result/${encodeURIComponent(scheduledJob.resultId)}`, { credentials: "same-origin" }); if (!response.ok) throw new Error(`HTTP ${response.status}`); setResult(await response.json()); setError(null); } catch (failure) { setError(String(failure)); } }}>Open saved result</button>}{scheduledJob.state === "pending" && <button type="button" className="underline ml-2" disabled={busy} onClick={async () => { const data = await post(`/api/scoped/scheduled/${scheduledJob.jobId}/cancel`, { expectedRevision: scheduledJob.revision }); if (data) { setScheduledJob({ ...scheduledJob, ...data }); setScheduleConfirmed(false); } }}>Cancel approval</button>}</div>}
         </div>}
         </>}
-        {scope === "turn_window" && !textOnly && ["source_capture_partial", "turn_content_partial"].includes(preview.unavailableReason) && <button type="button" className="border px-3 py-2 mt-2" onClick={() => { ++previewSequence.current; setTextOnly(true); setPreview(null); setPreviewKey(null); setConfirmed(false); setScheduleConfirmed(false); setScheduledJob(null); setResult(null); }}>Review recorded text only…</button>}
+        {scope === "turn_window" && !textOnly && ["source_capture_partial", "turn_content_partial"].includes(preview.unavailableReason) && <button type="button" className="border px-3 py-2 mt-2" onClick={() => { ++previewSequence.current; setTextOnly(true); setHistorical(false); setPreview(null); setPreviewKey(null); setConfirmed(false); setScheduleConfirmed(false); setScheduledJob(null); setResult(null); }}>Review recorded text only…</button>}
       </div>}
       {result && current && <div className="border p-3" style={{ borderColor: C.border }}>
         <p>Evaluation {result.status} · evidence {result.coverage} · evaluator {result.evaluatorFingerprint}</p>
+        {result.stale === true && <p role="status" style={{ color: C.amber }}>Saved evidence is stale. This assessment has been preserved; preview the current evidence separately.</p>}
+        <p style={{ color: C.sub }}>Citation checks: {result.citationValidation || "legacy membership check"}. Semantic support is an unverified judge assessment.</p>
         {result.dimensions?.map((item) => <div key={item.name} className="mt-2">
-          <p>{item.name}: {item.verdict}{item.citationStatus !== "linked" ? " · Uncited judge opinion" : ""} · {item.explanation} {item.evidenceReferences?.join(", ")}</p>
+          <p>{item.name}: {item.verdict}{item.citationStatus === "uncited_opinion" ? " · Uncited judge opinion" : " · Citation support unverified"} · {item.explanation} {item.evidenceReferences?.join(", ")}</p>
           <p style={{ color: C.sub }}>Criterion: {result.criterionDescriptions?.[item.name] || "Exact criterion wording unavailable for this older result"}</p>
         </div>)}
+        {result.audit && <div className="space-y-3 mt-3">
+          <div className="font-semibold">Per-turn audit</div>
+          {result.audit.turns.map((turn) => <div key={turn.reference} className="border p-2 break-words" style={{ borderColor: C.border }}>
+            <p>{turn.reference}</p>
+            {result.auditEvidence?.pairs?.filter((pair) => pair.reference === turn.reference).map((pair) => <div key={pair.reference}>
+              <p>{pair.startedAt || "Start time unknown"} → {pair.endedAt || "End time unknown"}</p>
+              <p>Request: {pair.request}</p><p>Response: {pair.response}</p>
+            </div>)}
+            {["original", "retrospective"].map((phase) => <div key={phase}><strong>{phase === "original" ? "Original response" : "Retrospective history"}</strong>
+              {Object.entries(turn[phase]).map(([name, item]) => <p key={name}>{name}: {item.verdict} · {item.reason} {item.evidence.map((c) => `${c.reference}: “${c.quote}”`).join("; ")}</p>)}
+            </div>)}
+          </div>)}
+          <div className="font-semibold">Historical findings and individual recovery</div>
+          {result.audit.findings.length === 0 && <p>No specific historical findings reported by this judge.</p>}
+          {result.audit.findings.map((finding) => <div key={finding.id} className="border p-2 break-words" style={{ borderColor: C.border }}>
+            <p>{finding.id} · {finding.dimension} · {finding.basis} · {finding.claim}</p>
+            <p>{finding.reason}</p><p>{finding.evidence.map((c) => `${c.reference}: “${c.quote}”`).join("; ")}</p>
+            <p>Recovery: {finding.recovery.status} · {finding.recovery.reason}</p>
+            <p>{finding.recovery.evidence.map((c) => `${c.reference}: “${c.quote}”`).join("; ")}</p>
+          </div>)}
+        </div>}
         {result.error && <p style={{ color: C.red }}>Judge result unavailable: {result.error}</p>}
       </div>}
       {error && <p role="alert" style={{ color: C.red }}>{error}</p>}

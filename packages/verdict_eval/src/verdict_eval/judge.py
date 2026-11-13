@@ -5,7 +5,7 @@ Decisions (see ADR-002):
 - Chain-of-thought reasoning before verdict.
 - Multi-dimensional decomposition reduces self-preference ~31% (Wataoka).
 - JSON-structured output for parseable verdicts.
-- The judge prompt explicitly instructs "ignore length / style" (verbosity bias).
+- Explicit length, style, and formatting requirements govern; insufficient evidence is UNCLEAR.
 """
 
 from __future__ import annotations
@@ -111,12 +111,15 @@ sentences of reasoning, then output PASS or FAIL.
 
 Important:
 - Be specific. Cite phrases from the response when justifying a FAIL.
-- IGNORE response length and stylistic preferences. A short correct answer is
-  better than a long verbose one. A long correct answer is no better than a
-  short correct one. Do not reward verbosity or hedging.
-- IGNORE markdown/formatting unless the user explicitly asked for a format.
-- If a dimension is genuinely not applicable to this query/response pair,
-  output UNCLEAR (only when truly inapplicable; the default is PASS or FAIL).
+- Apply explicit rubric and user requirements for length, style, and formatting.
+  Otherwise do not reward verbosity or personal stylistic preferences.
+- PASS means sufficient evidence meets the criterion; FAIL means sufficient
+  evidence demonstrates a violation, including an omitted requirement in a
+  complete actual answer. Insufficient evidence or inapplicability is UNCLEAR.
+  Missing capture alone is not an application failure.
+- Treat user allegations as claims, not established factual truth. Follow the
+  rubric evidence authority. A citation must support the conclusion; reference
+  membership alone is not evidence of support.
 - Output VALID JSON only. No prose before or after the JSON object.
 """
 
@@ -440,52 +443,23 @@ class JudgeEnsemble:
 # JSON parsing — tolerant of the typical wrappers models add
 # ---------------------------------------------------------------------------
 
-_MALFORMED_REASONING = "judge output malformed; dimension defaulted to UNCLEAR"
-
-
 def _parse_verdict_json(
     text: str, rubric: Rubric, finish_reason: object = None,
 ) -> dict[str, dict[str, object]]:
-    """Best-effort parse of the judge's JSON output.
-
-    Returns a dict mapping every rubric dimension to {"reasoning": str, "verdict": Verdict}.
-    Missing or malformed dimensions are recorded as UNCLEAR with a flagged
-    reason (ADR-002). A reply that is not a judgment at all, because the
-    provider cut it off at the output ceiling or it is oversized, raises
-    ``JudgeOutputUnusable`` so the caller records a retryable judge error
-    instead of a completed all-UNCLEAR judgment. Decoding is shared with the
-    conversation judge in ``judge_output``.
-    """
+    """Technical/malformed replies are errors; UNCLEAR is an evidence judgment."""
     names = [dimension.name for dimension in rubric.dimensions]
     if is_truncated(finish_reason):
         raise JudgeOutputUnusable("judge output truncated at the output token ceiling")
-    try:
-        parsed = decode_judge_dimensions(text if isinstance(text, str) else "", names)
-    except JudgeOutputUnusable:
-        raise
-    except JudgeOutputError:
-        parsed = {}
-
-    out: dict[str, dict[str, object]] = {}
+    parsed = decode_judge_dimensions(text, names)
+    if set(parsed) != set(names):
+        raise JudgeOutputError("judge dimensions differ from rubric")
+    out = {}
     for name in names:
-        try:
-            fields = dimension_fields(parsed[name])
-        except (KeyError, JudgeOutputError):
-            out[name] = {"verdict": Verdict.UNCLEAR, "reasoning": _MALFORMED_REASONING}
-            continue
-        out[name] = {
-            "verdict": _to_verdict(fields.verdict or "UNCLEAR"),
-            "reasoning": fields.reason,
-        }
+        fields = dimension_fields(parsed[name])
+        if fields.verdict not in {"PASS", "FAIL", "UNCLEAR"}:
+            raise JudgeOutputError("invalid judge verdict")
+        out[name] = {"verdict": Verdict(fields.verdict.lower()), "reasoning": fields.reason}
     return out
-
-
-def _to_verdict(s: str) -> Verdict:
-    if s in {"PASS", "TRUE", "YES", "1"}:
-        return Verdict.PASS
-    if s in {"FAIL", "FALSE", "NO", "0"}:
-        return Verdict.FAIL
-    return Verdict.UNCLEAR
 
 
 def verdict_is_pass(verdict: object) -> bool:

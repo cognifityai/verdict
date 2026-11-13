@@ -76,16 +76,13 @@ class CountingProvider:
         self.requests = []
 
     def complete(self, request):
+        import re
+
         self.calls += 1
         self.requests.append(request)
-        return CompletionResponse(
-            text=(
-                '{"relevance":{"reasoning":"direct","verdict":"PASS"},'
-                '"completeness":{"reasoning":"complete","verdict":"PASS"}}'
-            ),
-            input_tokens=10,
-            output_tokens=8,
-        )
+        names = re.findall(r"^- ([^:]+):", request.messages[-1]["content"], re.MULTILINE)
+        return CompletionResponse(text=json.dumps({name: {"reasoning": "direct", "verdict": "PASS"}
+                                                   for name in names}), input_tokens=10, output_tokens=8)
 
 
 @pytest.mark.parametrize("name,key,adapter", [

@@ -1493,3 +1493,7 @@ of an empty successful dashboard.
 
 Questions or a capture failure on your SDK version? Open an issue with the output
 of `scripts/live_capture_check.py`.
+
+See [bounded evaluation reliability](EVALUATION_RELIABILITY.md) for PASS/FAIL/UNCLEAR versus execution
+errors, producer-declared content suitability, and the optional single-call
+historical audit with separate original assessments and finding-specific recovery.

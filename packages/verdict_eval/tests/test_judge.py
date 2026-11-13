@@ -56,7 +56,7 @@ def test_trace_judgment_identity_is_captured_before_provider_mutates() -> None:
             self.supports_temperature = True
             return super().complete(request)
 
-    provider = MutatingProvider("{}")
+    provider = MutatingProvider(_fake_json_for({d.name: "PASS" for d in DEFAULT_RUBRIC.dimensions}))
     judge = Judge(provider=provider, model="judge-a")
     expected = judge.evaluator_identity()
     result = judge.judge(query="question", response="answer")
@@ -165,9 +165,8 @@ def test_judge_preserves_verdict_when_fenced_reasoning_contains_markdown_fence()
 
 def test_judge_preserves_json_delimiters_and_escapes_inside_reasoning():
     reasoning = 'Compared {"nested": "value"}, a \\path, and a "quoted" phrase.'
-    payload = json.dumps({
-        "groundedness": {"reasoning": reasoning, "verdict": "FAIL"},
-    })
+    payload = json.dumps({d.name: {"reasoning": reasoning, "verdict": "FAIL"}
+                          for d in DEFAULT_RUBRIC.dimensions})
 
     judgment = Judge(provider=FakeProvider(payload), model="fake-judge").judge(
         query="hi", response="hello"
@@ -193,15 +192,12 @@ def test_judge_ignores_unrelated_json_object_before_verdict_object():
     assert judgment.pass_count == len(DEFAULT_RUBRIC.dimensions)
 
 
-def test_judge_keeps_malformed_json_unclear():
+def test_judge_rejects_malformed_json_as_technical_error():
+    from verdict_eval.judge_output import JudgeOutputError
+
     payload = '```json\n{"groundedness": {"reasoning": "broken", "verdict": "FAIL"}'
-
-    judgment = Judge(provider=FakeProvider(payload), model="fake-judge").judge(
-        query="hi", response="hello"
-    )
-
-    assert all(dimension.verdict == Verdict.UNCLEAR for dimension in judgment.dimensions)
-
+    with pytest.raises(JudgeOutputError):
+        Judge(provider=FakeProvider(payload), model="fake-judge").judge(query="hi", response="hello")
 
 def test_judge_tolerates_garbage_before_json():
     payload = "Sure, here's my evaluation:\n" + _fake_json_for(
@@ -212,15 +208,12 @@ def test_judge_tolerates_garbage_before_json():
     assert j.pass_count == len(DEFAULT_RUBRIC.dimensions)
 
 
-def test_judge_records_unclear_when_dimension_missing():
-    payload = json.dumps({"groundedness": {"reasoning": "r", "verdict": "PASS"}})
-    judge = Judge(provider=FakeProvider(payload), model="fake-judge")
-    j = judge.judge(query="hi", response="hello")
-    by_name = {d.name: d.verdict for d in j.dimensions}
-    assert by_name["groundedness"] == Verdict.PASS
-    assert by_name["relevance"] == Verdict.UNCLEAR
-    assert by_name["completeness"] == Verdict.UNCLEAR
+def test_judge_rejects_missing_dimension_as_technical_error():
+    from verdict_eval.judge_output import JudgeOutputError
 
+    payload = json.dumps({"groundedness": {"reasoning": "r", "verdict": "PASS"}})
+    with pytest.raises(JudgeOutputError):
+        Judge(provider=FakeProvider(payload), model="fake-judge").judge(query="hi", response="hello")
 
 def test_ensemble_majority_vote():
     pass_payload = _fake_json_for({d.name: "PASS" for d in DEFAULT_RUBRIC.dimensions})
@@ -303,19 +296,12 @@ def test_judge_accepts_a_wrapped_list_of_named_dimensions():
     assert judgment.pass_count == len(DEFAULT_RUBRIC.dimensions) - 1
 
 
-def test_duplicate_keys_no_longer_let_the_last_value_win():
-    payload = (
-        '{"completeness": {"reasoning": "first", "verdict": "PASS"}, '
-        '"completeness": {"reasoning": "second", "verdict": "FAIL"}}'
-    )
+def test_duplicate_keys_are_a_technical_error():
+    from verdict_eval.judge_output import JudgeOutputError
 
-    judgment = Judge(provider=FakeProvider(payload), model="fake-judge").judge(
-        query="hi", response="hello",
-    )
-
-    completeness = next(d for d in judgment.dimensions if d.name == "completeness")
-    assert completeness.verdict == Verdict.UNCLEAR
-    assert judgment.fail_count == 0
+    payload = '{"completeness":{"verdict":"PASS"},"completeness":{"verdict":"FAIL"}}'
+    with pytest.raises(JudgeOutputError):
+        Judge(provider=FakeProvider(payload), model="fake-judge").judge(query="hi", response="hello")
 
 
 @pytest.mark.parametrize("finish_reason", ["max_tokens", "length", "MAX_TOKENS"])
@@ -347,15 +333,12 @@ def test_oversize_reply_is_a_judge_error_not_a_partial_result():
         Judge(provider=FakeProvider(payload), model="fake-judge").judge(query="q", response="r")
 
 
-def test_complete_but_malformed_reply_stays_unclear_per_dimension():
-    judge = Judge(provider=_ResponseProvider("I cannot evaluate this.", "end_turn"),
-                  model="fake-judge")
+def test_complete_but_malformed_reply_is_a_technical_error():
+    from verdict_eval.judge_output import JudgeOutputError
 
-    judgment = judge.judge(query="hi", response="hello")
-
-    assert all(d.verdict == Verdict.UNCLEAR for d in judgment.dimensions)
-    assert all("malformed" in d.reasoning for d in judgment.dimensions)
-
+    judge = Judge(provider=_ResponseProvider("I cannot evaluate this.", "end_turn"), model="fake-judge")
+    with pytest.raises(JudgeOutputError):
+        judge.judge(query="hi", response="hello")
 
 def test_evaluator_identity_records_and_follows_the_output_contract(monkeypatch):
     from verdict_eval import judge_output

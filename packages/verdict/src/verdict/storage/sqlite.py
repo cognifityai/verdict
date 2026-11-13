@@ -355,6 +355,8 @@ CREATE TABLE IF NOT EXISTS agent_turns (
     request_truncated INTEGER NOT NULL DEFAULT 0 CHECK(request_truncated IN (0,1)),
     response_truncated INTEGER NOT NULL DEFAULT 0 CHECK(response_truncated IN (0,1)),
     progress_redacted TEXT,
+    request_content_kind TEXT NOT NULL DEFAULT 'unknown',
+    response_content_kind TEXT NOT NULL DEFAULT 'unknown',
     PRIMARY KEY (tenant_id, run_id, turn_id),
     UNIQUE (tenant_id, run_id, sequence),
     FOREIGN KEY (tenant_id, run_id) REFERENCES agent_runs(tenant_id, run_id)
@@ -1052,6 +1054,8 @@ class SQLiteStorage:
                     "INTEGER NOT NULL DEFAULT 0 CHECK(response_truncated IN (0,1))",
                 ),
                 ("progress_redacted", "TEXT"),
+                    ("request_content_kind", "TEXT NOT NULL DEFAULT 'unknown'"),
+                    ("response_content_kind", "TEXT NOT NULL DEFAULT 'unknown'"),
             ):
                 if column not in agent_turn_columns:
                     self._conn.execute(f"ALTER TABLE agent_turns ADD COLUMN {column} {ddl}")
@@ -1324,8 +1328,8 @@ class SQLiteStorage:
                 request_state, response_state, input_tokens, cached_input_tokens,
                 cache_write_input_tokens, output_tokens, reasoning_output_tokens,
                 total_tokens, token_usage_basis, request_truncated, response_truncated,
-                progress_redacted
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                progress_redacted, request_content_kind, response_content_kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(tenant_id, run_id, turn_id) DO UPDATE SET
                 ended_at=excluded.ended_at,
                 status=excluded.status,
@@ -1342,7 +1346,9 @@ class SQLiteStorage:
                 token_usage_basis=excluded.token_usage_basis,
                 request_truncated=excluded.request_truncated,
                 response_truncated=excluded.response_truncated,
-                progress_redacted=excluded.progress_redacted""",
+                progress_redacted=excluded.progress_redacted,
+                request_content_kind=excluded.request_content_kind,
+                response_content_kind=excluded.response_content_kind""",
             [
                 (
                     run.tenant_id,
@@ -1366,6 +1372,8 @@ class SQLiteStorage:
                     int(turn.request_truncated),
                     int(turn.response_truncated),
                     turn.progress_redacted,
+                    turn.request_content_kind,
+                    turn.response_content_kind,
                 )
                 for turn in turns
             ],

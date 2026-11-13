@@ -356,6 +356,8 @@ CREATE TABLE IF NOT EXISTS agent_turns (
     request_truncated BOOLEAN NOT NULL DEFAULT FALSE,
     response_truncated BOOLEAN NOT NULL DEFAULT FALSE,
     progress_redacted TEXT,
+    request_content_kind TEXT NOT NULL DEFAULT 'unknown',
+    response_content_kind TEXT NOT NULL DEFAULT 'unknown',
     PRIMARY KEY (tenant_id, run_id, turn_id),
     UNIQUE (tenant_id, run_id, sequence),
     FOREIGN KEY (tenant_id, run_id) REFERENCES agent_runs(tenant_id, run_id)
@@ -1057,6 +1059,8 @@ class PostgresStorage:
                     ("request_truncated", "BOOLEAN NOT NULL DEFAULT FALSE"),
                     ("response_truncated", "BOOLEAN NOT NULL DEFAULT FALSE"),
                     ("progress_redacted", "TEXT"),
+                    ("request_content_kind", "TEXT NOT NULL DEFAULT 'unknown'"),
+                    ("response_content_kind", "TEXT NOT NULL DEFAULT 'unknown'"),
                 ]:
                     cur.execute(
                         f"ALTER TABLE agent_turns ADD COLUMN IF NOT EXISTS {col} {ddl}"
@@ -1435,8 +1439,8 @@ class PostgresStorage:
                    request_state,response_state,input_tokens,cached_input_tokens,
                    cache_write_input_tokens,output_tokens,reasoning_output_tokens,
                    total_tokens,token_usage_basis,request_truncated,response_truncated,
-                   progress_redacted
-               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   progress_redacted,request_content_kind,response_content_kind
+               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (tenant_id,run_id,turn_id) DO UPDATE SET
                    ended_at=EXCLUDED.ended_at,
                    status=EXCLUDED.status,
@@ -1453,7 +1457,9 @@ class PostgresStorage:
                    token_usage_basis=EXCLUDED.token_usage_basis,
                    request_truncated=EXCLUDED.request_truncated,
                    response_truncated=EXCLUDED.response_truncated,
-                   progress_redacted=EXCLUDED.progress_redacted""",
+                   progress_redacted=EXCLUDED.progress_redacted,
+                   request_content_kind=EXCLUDED.request_content_kind,
+                   response_content_kind=EXCLUDED.response_content_kind""",
             [
                 (
                     run.tenant_id,
@@ -1477,6 +1483,8 @@ class PostgresStorage:
                     turn.request_truncated,
                     turn.response_truncated,
                     turn.progress_redacted,
+                    turn.request_content_kind,
+                    turn.response_content_kind,
                 )
                 for turn in turns
             ],

@@ -29,7 +29,7 @@ from verdict_eval.providers import CompletionRequest, output_token_ceiling
 # The stored prompt version names the result rules (bump it when they change),
 # then the output contract the reply is decoded with, then a fingerprint of the
 # prompt template text. Any of the three changing makes a new evaluator.
-PROMPT_VERSION = "conversation_rubric_v2"
+PROMPT_VERSION = "conversation_rubric_v3"
 _PROVIDERS = {"openai", "anthropic", "google"}
 _ENDPOINT_ENV = {"openai": "OPENAI_BASE_URL", "anthropic": "ANTHROPIC_BASE_URL"}
 
@@ -224,7 +224,11 @@ _PROMPT_TEMPLATE = (
     "{example}\n"
     "For a binary dimension, verdict is PASS, FAIL or UNCLEAR. For a numeric dimension, "
     "score is a number within the rubric's min and max. Use UNCLEAR, or a null score, when "
-    "the evidence is insufficient. reason is one short sentence. findings is a list, empty when there "
+    "the evidence is insufficient. Missing capture alone is not an application failure. "
+    "A complete actual answer omitting a requested requirement can FAIL. Respect explicit "
+    "length, style and formatting requirements. Follow the rubric evidence authority; "
+    "user allegations are claims, not established truth. Citation membership does not "
+    "establish semantic support. reason is one short sentence. findings is a list, empty when there "
     "is nothing to cite, of objects {{\"issue\": \"<short_snake_case_label>\", "
     "\"message_position\": <0-based index of the message in evidence.messages>, "
     "\"quote\": \"<text copied exactly from that message>\", \"reason\": \"<why it "
