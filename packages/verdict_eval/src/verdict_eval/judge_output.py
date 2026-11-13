@@ -87,7 +87,10 @@ def _candidates(text: str) -> Iterator[object]:
     is bounded so malformed output cannot force unbounded decode attempts. A
     duplicate key or non-finite number anywhere in a decodable value rejects
     the whole reply: continuing the scan could otherwise select an inner
-    object of a value that contradicted itself.
+    object of a value that contradicted itself. For the same reason an object
+    that does not decode rejects the reply: the scan cannot tell where it
+    ends, so it would select whichever inner or later object happens to be
+    valid. Brackets are still skipped, because prose uses them.
     """
     starts = 0
     index = 0
@@ -101,7 +104,9 @@ def _candidates(text: str) -> Iterator[object]:
             raise JudgeOutputError("judge output has too many candidate values")
         try:
             candidate, end = _DECODER.raw_decode(text, index)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            if character == "{":
+                raise JudgeOutputError("malformed judge JSON object") from exc
             index += 1
             continue
         yield candidate
@@ -220,7 +225,7 @@ def decode_judge_object(text: object) -> dict:
         raise JudgeOutputError("invalid audit output size or type")
     try:
         candidates = list(_candidates(text))
-    except RecursionError as exc:
+    except (RecursionError, JudgeOutputError) as exc:
         raise JudgeOutputError("invalid audit JSON") from exc
     answers = [candidate for candidate in candidates if isinstance(candidate, dict) and "turns" in candidate]
     if len(answers) > 1:

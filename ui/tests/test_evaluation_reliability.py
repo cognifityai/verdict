@@ -292,6 +292,36 @@ def test_audit_preview_withholds_oversized_shape_and_binds_budget(reliability_st
     assert first["upperStaticListPriceUsd"] > second["upperStaticListPriceUsd"]
 
 
+def test_redacted_run_identifier_reports_unknown_freshness_not_stale(reliability_store, monkeypatch):
+    """A run ID the redactor rewrites cannot select its evidence again."""
+    import verdict.dashboard.scoped_evaluation as scoped
+
+    storage, url = reliability_store
+    run_id = "run-10.0.0.12"
+    base = history_bundle()
+    bundle = replace(base, run=replace(base.run, run_id=run_id),
+                     turns=tuple(replace(turn, run_id=run_id) for turn in base.turns))
+    storage.replace_agent_run_bundle(bundle)
+    config = {**audit_config(), "runId": run_id}
+    preview = preview_scoped(storage, tenant="local", config=config, storage_url=url)
+    provider = AuditProvider(audit_reply(preview["evidencePreview"], recoveries={0: 1}))
+    monkeypatch.setattr(scoped, "_provider", lambda _: provider)
+
+    async def scenario():
+        app = create_app(storage=url, tenant_id="local")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            completed = await client.post("/api/scoped/run", json={**config, "planFingerprint": preview["planFingerprint"],
+                                         "confirmExternalEgress": True}, headers=headers)
+            assert completed.status_code == 200, completed.text
+            saved = (await client.get(f"/api/scoped/result/{completed.json()['resultId']}")).json()
+            assert saved["evidenceStatus"] == "unknown"
+            assert saved["evidenceSelection"] is None
+            assert run_id not in json.dumps(saved)
+    asyncio.run(scenario())
+
+
 def test_scheduled_audit_retains_mode_policy_and_output_allowance(reliability_store):
     storage, url = reliability_store
     storage.replace_agent_run_bundle(history_bundle())

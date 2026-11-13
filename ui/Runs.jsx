@@ -831,7 +831,7 @@ function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, ot
       <div className="mt-4 text-xs" style={{ color: color.sub }}>
         Estimated API list price: {sourceUsage.listPriceUsd == null ? "Not priced" : `$${Number(sourceUsage.listPriceUsd).toFixed(4)}`} ({sourceUsage.pricedTurns || 0}/{run.turnCount} turns priced). This is not a subscription bill; missing and mixed-model turns remain unpriced.
       </div>
-      {(run.scopedEvaluationEligible !== false || run.historicalAuditAvailable === true) && <ScopedEvaluate root={url.replace(/\/api\/runs$/, "")} scope="run" runId={run.runId} auditOnly={run.scopedEvaluationEligible === false} />}
+      {(run.scopedEvaluationEligible !== false || run.historicalAuditAvailable === true) && <ScopedEvaluate key={run.runId} root={url.replace(/\/api\/runs$/, "")} scope="run" runId={run.runId} auditOnly={run.scopedEvaluationEligible === false} />}
       <EvidenceSuitability suitability={run.scopedEvaluationSuitability} />
       {run.scopedEvaluationEligible === false && <p className="mt-3 text-xs" style={{ color: color.sub }}>Whole-run evaluation unavailable: {run.scopedEvaluationUnavailableReason?.replaceAll("_", " ") || "incomplete evidence"}. {run.historicalAuditAvailable === true ? "A historical audit, which reports this limitation, remains available." : "Open a turn or tool action to inspect smaller evidence."}</p>}
       {onDraftCase && <button type="button" className="border px-3 py-2 mt-3 text-xs" disabled={detail.loading || !detail.data?.turns?.length}
