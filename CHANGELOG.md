@@ -31,7 +31,8 @@ the product is refined.
   `provider_error`. Each frozen cohort records its metric-definition version;
   monitors with an earlier reference require a new reviewed reference.
 - Judges use UNCLEAR for insufficient evidence and respect explicit writing
-  requirements. Malformed or contradictory structured replies are errors.
+  requirements. Malformed or contradictory structured replies are errors,
+  including a broken JSON object that contains or precedes a valid one.
   New prompt/parser identities keep earlier saved methodologies distinct.
 - Saved audit history remains immutable and the result API discloses stale
   evidence separately. Citation linkage and exact quotes do not verify entailment.

@@ -247,10 +247,28 @@ def test_oversize_reply_is_unusable_not_malformed() -> None:
 
 
 def test_candidate_scan_is_bounded() -> None:
-    text = "{ " * 65 + '{"helpful": {"verdict": "PASS"}}'
+    text = "[ " * 65 + '{"helpful": {"verdict": "PASS"}}'
 
     with pytest.raises(JudgeOutputError, match="candidate"):
         decode_judge_dimensions(text, ["helpful"])
+
+
+@pytest.mark.parametrize("text", [
+    # The answer object is broken, so only its inner dimensions object decodes.
+    '{"dimensions": {"helpful": {"verdict": "PASS", "reason": "ok"}}',
+    '{"dimensions": {"helpful": {"verdict": "PASS", "reason": "ok"}}, oops}',
+    # A broken first answer followed by a valid second one.
+    '{"helpful": {"verdict": "FAIL", "reason": "said "no""}} {"helpful": {"verdict": "PASS", "reason": "ok"}}',
+])
+def test_malformed_answer_object_is_an_error_not_its_valid_inner_object(text) -> None:
+    with pytest.raises(JudgeOutputError, match="malformed judge JSON object"):
+        decode_judge_dimensions(text, ["helpful"])
+
+
+def test_brackets_in_prose_are_still_skipped() -> None:
+    text = 'Scores [see below]:\n{"helpful": {"verdict": "PASS", "reason": "ok"}}'
+
+    assert decode_judge_dimensions(text, ["helpful"]) == {"helpful": {"verdict": "PASS", "reason": "ok"}}
 
 
 def test_dimension_fields_normalize_verdict_reason_and_findings() -> None:

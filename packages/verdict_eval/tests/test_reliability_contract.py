@@ -105,3 +105,7 @@ def test_malformed_audit_object_is_invalid_json_not_its_inner_objects():
     assert malformed != reply
     with pytest.raises(JudgeOutputError, match="invalid audit JSON"):
         decode_judge_object(malformed)
+    # A broken draft followed by a valid answer is not one clean answer.
+    with pytest.raises(JudgeOutputError, match="invalid audit JSON"):
+        decode_judge_object(malformed + "\n" + reply)
+    assert decode_judge_object(reply)["turns"]

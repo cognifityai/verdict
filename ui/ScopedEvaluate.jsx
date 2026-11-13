@@ -38,7 +38,9 @@ export function ScopedEvaluate({ root, scope, runId = null, turnId = null, event
   const [model, setModel] = useState(DEFAULT_MODELS.anthropic);
   const [reviewFocus, setReviewFocus] = useState(scope === "turn_window" ? "correction" : "task_completion");
   const [textOnly, setTextOnly] = useState(false);
-  const [auditMode, setAuditMode] = useState(auditOnly);
+  const [auditChoice, setAuditChoice] = useState(false);
+  // Derived, not initial state: auditOnly can change while the panel is mounted.
+  const auditMode = auditOnly || auditChoice;
   const [aggregation, setAggregation] = useState("historical_all_turns");
   const [authority, setAuthority] = useState("recorded_sources");
   const [requireSources, setRequireSources] = useState(false);
@@ -96,7 +98,7 @@ export function ScopedEvaluate({ root, scope, runId = null, turnId = null, event
     {open && <div className="border p-3 mt-2 space-y-3" style={{ borderColor: C.border }}>
       <p style={{ color: C.sub }}>Optional external judge. Analyze and recorded findings remain available without a provider key. No evidence is sent until you review and approve the preview.</p>
       {["session", "run", "turn_window"].includes(scope) && !textOnly && <>
-        <label className="flex gap-2"><input type="checkbox" aria-label="Historical audit" checked={auditMode} disabled={auditOnly} onChange={(event) => { setAuditMode(event.target.checked); setConfirmed(false); }} />Historical audit: assess each original response separately and track later recovery per finding.</label>
+        <label className="flex gap-2"><input type="checkbox" aria-label="Historical audit" checked={auditMode} disabled={auditOnly} onChange={(event) => { setAuditChoice(event.target.checked); setConfirmed(false); }} />Historical audit: assess each original response separately and track later recovery per finding.</label>
         {auditOnly && <p style={{ color: C.sub }}>Only a historical audit is available for this selection: its event capture is partial or its order is uncertain, and the audit reports that limitation.</p>}
         {auditMode && <div className="space-y-2">
           <label>Aggregation<select aria-label="Audit aggregation" className="block border p-2 mt-1 w-full bg-transparent" value={aggregation} onChange={(event) => { setAggregation(event.target.value); setConfirmed(false); }}><option value="historical_all_turns">Historical: every assessed response must pass; recovery preserves earlier failures</option><option value="final_response">Final selected response: completion at the end</option><option value="holistic">Holistic: assess the selected work as a whole</option></select></label>

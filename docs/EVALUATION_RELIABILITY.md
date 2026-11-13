@@ -125,7 +125,9 @@ be changed into a retrospective PASS. Missing entries or contradictory structure
 results are errors. Partial evidence, ambiguous chronology, or ambiguous recovery
 cannot produce a clean aggregate PASS. The reply may be wrapped in a Markdown
 fence or a sentence, but must contain exactly one JSON object with a `turns` key;
-a second answer or malformed JSON is an error.
+a second answer or malformed JSON is an error. A JSON object that does not
+decode makes the whole reply an error, for both the audit and the trace judge,
+rather than letting a valid object inside or after it stand as the answer.
 
 When ordinary evaluation of a run or session is unavailable only because its
 event capture is partial or its event order is uncertain, and its turn text is
@@ -140,7 +142,10 @@ consumers. Ignored caller metadata is not persisted. Static result metadata is
 checked before egress. A provider reply exceeding durable result limits becomes
 a saved technical error and is not retried automatically. Saved
 results are immutable. The result API reports `evidenceStatus` separately as
-current, stale, or unknown; older records without selection metadata are unknown.
+current, stale, or unknown; older records without selection metadata are unknown,
+and so is a result whose selected run or session ID the redactor alters (for
+example, an ID containing an IP address), because the redacted ID no longer
+selects the evidence.
 A matching preview reopens the saved result without another call. Changed
 evidence requires a new preview and preserves prior assessments.
 

@@ -678,6 +678,10 @@ def _persistable_result(payload: dict) -> dict:
     safe = redact_structure(json.loads(_safe_json(payload)))
     if not isinstance(safe, dict):
         raise ValueError("scoped result redaction failed")
+    if safe.get("evidenceSelection") != payload.get("evidenceSelection"):
+        # A redacted identifier no longer selects the evidence, so freshness
+        # would always read as stale. Keep no selection: freshness is unknown.
+        safe["evidenceSelection"] = None
     _safe_json(safe)
     return safe
 
