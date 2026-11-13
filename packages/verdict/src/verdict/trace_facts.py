@@ -32,7 +32,11 @@ _STATUS_ONLY_FINISH_REASONS = frozenset({"completed", "in_progress", "queued"})
 
 def _recorded_tool_call_count(tags: object) -> int | None:
     count = tags.get(RESPONSE_TOOL_CALLS_TAG) if isinstance(tags, dict) else None
-    return int(count) if isinstance(count, str) and count.isdigit() else None
+    # ASCII digits only: ``str.isdigit`` also accepts characters such as "²"
+    # that ``int`` rejects, and the length bound keeps ``int`` within its limit.
+    if isinstance(count, str) and count.isascii() and count.isdigit() and len(count) <= 9:
+        return int(count)
+    return None
 
 
 def response_has_tool_calls(*, tags: object, finish_reason: object) -> bool:

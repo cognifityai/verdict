@@ -1094,6 +1094,10 @@ def plan_prospective_manifest(
         raise ValueError("policy fingerprint changed; create a candidate policy")
     if previous.reference_summary is None or previous.current_summary is None:
         raise ValueError("monitor policy requires re-bootstrap")
+    # A reference measured under other metric definitions cannot anchor a
+    # successor measured under the current ones.
+    if previous.metric_contract_version != METRIC_CONTRACT_VERSION:
+        raise ValueError("monitor policy requires re-bootstrap")
     if previous.comparison_index > 0 and previous.prospective_start_at is None:
         raise ValueError("monitor policy requires re-bootstrap")
     if previous.prospective_start_at is not None:
