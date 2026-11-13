@@ -562,7 +562,10 @@ is not blank. A reply counts as blank only when the capture can rule out an
 omitted tool call: SDK capture records the call's tool-call count, including
 zero, or the provider reported a stop reason. An empty reply without either,
 such as an OpenAI Responses call captured before the tool-call count existed,
-is left out of the metric rather than guessed. Calls with no captured response
+is left out of the metric rather than guessed. So is an empty reply that stopped
+at its output limit (for example OpenAI `incomplete` or `length`, or Anthropic
+`max_tokens`): it was cut off, so it does not show whether the model would have
+answered. Calls with no captured response
 field, and calls with a recorded provider error, are excluded from
 `response_empty` and `refusal_signature`; a provider error is measured only by
 `provider_error`. A significant change in the blank rate is a capture-level

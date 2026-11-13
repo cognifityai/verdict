@@ -1324,6 +1324,12 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
             if occurred_at is not None:
                 model_events[message_id] = active.events[-1]
         elif model_event is not None:
+            # A later row for the same message can carry the provider error;
+            # the call failed even though earlier rows streamed content.
+            api_error = _claude_api_error(row)
+            if api_error is not None and not model_event.attributes.get("error"):
+                model_event.status = ExecutionStatus.FAILED
+                model_event.attributes["error"] = api_error
             usage = _record_claude_usage(active, message_id, message.get("usage"))
             if usage is None:
                 for name in ("input_tokens", "output_tokens"):
