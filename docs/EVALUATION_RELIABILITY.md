@@ -55,8 +55,11 @@ evaluation. Undeclared legacy roles stay unknown; Verdict does not infer roles
 from text length or words and does not disable all legacy evaluations.
 
 Source bodies must be captured as context or tool-result events; a declaration
-alone cannot supply them. Empty bodies or explicit `available=False` cannot
-satisfy a required source. Suitability and the exact missing field/role remain
+alone cannot supply them. A source cannot satisfy a required source when its body
+is empty or whitespace only (including containers of blank values), when it is
+marked `available=False`, when its event status is failed, timed out, or
+cancelled, or when it is an error-flagged tool result. Its status stays visible in
+the evidence. Suitability and the exact missing field/role remain
 visible in blocked run/session views and previews. An integration that currently records only a completion
 summary, title, count, or source locator needs separate producer wiring to record
 the actual answer and available source bodies, under its existing privacy and
@@ -101,20 +104,34 @@ policies, provider/model configuration, output allowance, destination, and evide
 bind the evaluator and approval. There is one provider attempt, no per-turn
 fan-out and no automatic retry. Scheduling preserves the same exact approval.
 
-Ordered pairs include source/session/run/turn-qualified identities, available
-timestamps, and leaf evidence references. Source turn sequence owns order within
+Ordered pairs carry available timestamps and short positional references: `T1`
+is the first selected turn in order, `Q1` its request, `R1` its response, and
+`E1` the first selected event. References carry no stored source, session, run,
+turn, or event identifier, and the judge request omits those identifiers. Pair
+text is passed through the current redaction rules before it is fingerprinted,
+previewed, or sent, including text stored by an earlier release. Source turn sequence owns order within
 a run; timestamps cannot reverse it. Overlapping runs or disagreement between
 source order and timestamps remain uncertain. Original assessments can cite only
 evidence recorded as available at the original response; retrospective assessments
 may use later recorded evidence. The original, later, and uncertain-availability
 reference lists partition all selected evidence, including a source recorded after
 its own response. Timestamps are source-reported, not causal proof. Unknown
-availability remains uncertain. Findings belong to a specific response and dimension.
+availability remains uncertain. Findings belong to a specific response and
+dimension; Verdict numbers them `F1`, `F2`, … in reply order, and a judge-supplied
+finding ID is a contract error.
 Each finding has its own recovered, unresolved, or unclear state; recovered
 requires a cited, unambiguously later response. A supported original FAIL cannot
 be changed into a retrospective PASS. Missing entries or contradictory structured
 results are errors. Partial evidence, ambiguous chronology, or ambiguous recovery
-cannot produce a clean aggregate PASS.
+cannot produce a clean aggregate PASS. The reply may be wrapped in a Markdown
+fence or a sentence, but must contain exactly one JSON object with a `turns` key;
+a second answer or malformed JSON is an error.
+
+When ordinary evaluation of a run or session is unavailable only because its
+event capture is partial or its event order is uncertain, and its turn text is
+complete, the panel still opens in historical-audit mode, because the audit
+discloses those limitations. Preview applies the audit's own suitability, shape,
+and size checks.
 
 Results persist `turnAssessments`, `historicalFindings`, `holisticAssessments`,
 ordered `turnPairs`, criterion policies, identities, and output allowance. Saved
