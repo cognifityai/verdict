@@ -252,3 +252,95 @@ def test_dashboard_compares_runs_and_saves_nothing(tmp_path) -> None:
         assert connection.execute("SELECT COUNT(*) FROM monitor_policies").fetchone()[0] == 0
     finally:
         connection.close()
+
+
+def _claude_history_with_unfinished_error(path) -> str:
+    """A complete answered turn, then an API-error row whose line is not yet finished."""
+    import json
+
+    rows = [
+        {"timestamp": "2026-08-30T11:00:00Z", "type": "user", "uuid": "user-1",
+         "sessionId": "claude-session-1", "message": {"content": "summarize the log"}},
+        {"timestamp": "2026-08-30T11:00:01Z", "type": "assistant", "uuid": "assistant-1",
+         "sessionId": "claude-session-1",
+         "message": {"id": "msg-1", "model": "claude-sonnet-4-5", "stop_reason": "end_turn",
+                     "usage": {"input_tokens": 1, "output_tokens": 1},
+                     "content": [{"type": "text", "text": "The log is clean."}]}},
+        {"timestamp": "2026-08-30T11:05:00Z", "type": "user", "uuid": "user-2",
+         "sessionId": "claude-session-1", "message": {"content": "and the next one?"}},
+    ]
+    error_row = json.dumps({
+        "timestamp": "2026-08-30T11:05:01Z", "type": "assistant", "uuid": "limit-1",
+        "sessionId": "claude-session-1", "isApiErrorMessage": True, "error": "rate_limit",
+        "apiErrorStatus": 429,
+        "message": {"id": "msg-limit", "model": "<synthetic>", "stop_reason": "stop_sequence",
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                    "content": [{"type": "text", "text": "Usage limit reached."}]},
+    })
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows) + error_row[:40])
+    return error_row
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite", "buffered", "postgres"])
+def test_incomplete_local_history_measures_no_event_metric_until_complete(tmp_path, kind) -> None:
+    """Adversarial: an unfinished last line can hide the failure that completes it."""
+    from verdict.telemetry.local_agents import capture_local_agents
+
+    root = tmp_path / "claude" / "project"
+    path = root / "session.jsonl"
+    error_row = _claude_history_with_unfinished_error(path)
+    with ExitStack() as stack:
+        storage = _storage(kind, stack, tmp_path)
+        try:
+            assert capture_local_agents(storage, tenant_id="local", claude_root=tmp_path / "claude").stored == 1
+            [partial] = storage.load_run_monitor_facts("local")
+            assert partial.events_partial
+            later = NOW.replace(year=2027)
+            assert [unit.metrics for unit in run_monitor_units([partial], now=later)] == [{}]
+
+            path.write_text(path.read_text()[:-40] + error_row + "\n")
+            assert capture_local_agents(storage, tenant_id="local", claude_root=tmp_path / "claude").stored == 1
+            [complete] = storage.load_run_monitor_facts("local")
+            assert not complete.events_partial
+            assert [unit.metrics for unit in run_monitor_units([complete], now=later)] == [
+                {"run_model_call_error": True},
+            ]
+        finally:
+            storage.close()
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite", "buffered", "postgres"])
+def test_a_new_turn_resets_run_inactivity(tmp_path, kind) -> None:
+    """Adversarial: a run that started long ago is active again when a turn starts."""
+    from dataclasses import replace
+
+    from verdict.evidence import EvidenceState
+
+    with ExitStack() as stack:
+        reference = InMemoryStorage()
+        _record_runs(reference, healthy=1, failing=0)
+        [bundle] = reference.list_agent_run_bundles("tenant-a", limit=1)
+        shift = NOW - timedelta(hours=2) - bundle.run.started_at
+        turns = tuple(replace(turn, started_at=turn.started_at + shift,
+                              ended_at=turn.ended_at + shift if turn.ended_at else None)
+                      for turn in bundle.turns)
+        unanswered = replace(turns[0], turn_id="unanswered", sequence=len(turns),
+                             started_at=NOW - timedelta(minutes=5), ended_at=None,
+                             final_response_redacted=None, response_state=EvidenceState.MISSING)
+        open_run = replace(
+            bundle,
+            run=replace(bundle.run, started_at=bundle.run.started_at + shift, ended_at=None,
+                        status=ExecutionStatus.UNKNOWN),
+            turns=(*turns, unanswered),
+            events=tuple(replace(event, occurred_at=event.occurred_at + shift) for event in bundle.events),
+        )
+        storage = _storage(kind, stack, tmp_path)
+        try:
+            AgentCaptureService(storage).capture(open_run, traces=())
+            [facts] = storage.load_run_monitor_facts("tenant-a")
+            assert facts.last_activity_at == NOW - timedelta(minutes=5)
+            assert run_monitor_units([facts], now=NOW) == ()
+            assert len(run_monitor_units([facts], now=NOW + SETTLE)) == 1
+        finally:
+            storage.close()

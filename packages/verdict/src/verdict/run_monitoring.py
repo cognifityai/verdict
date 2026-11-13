@@ -16,9 +16,10 @@ from verdict.analysis import outcome_reported_values, recorded_event_issue
 from verdict.evidence import AgentEventType, ExecutionStatus
 from verdict.monitoring import AnalysisUnitRecord
 
-# A run without a terminal status is settled once it has recorded nothing for
-# this long. Local Claude Code and Codex histories never record a terminal run
-# status, so their runs settle only through inactivity.
+# A run without a terminal status is settled once it has recorded nothing (no
+# event and no turn start or end) for this long. Local Claude Code and Codex
+# histories never record a terminal run status, so their runs settle only
+# through inactivity.
 RUN_SETTLE_SECONDS = 30 * 60
 
 MAX_RUN_MONITOR_RUNS = 100_000
@@ -43,8 +44,11 @@ class RunMonitorFacts:
     started_at: datetime
     status: ExecutionStatus
     agent_name: str
-    last_event_at: datetime | None
-    capture_limited: bool
+    # Latest recorded event time or turn start/end; a new unanswered turn is activity.
+    last_activity_at: datetime | None
+    # Events may be missing: a capture-limit marker, or an incomplete or unverified
+    # local source history (the same rule the run view uses to mark it partial).
+    events_partial: bool
     event_counts: tuple[RunEventCount, ...]
 
 
@@ -52,7 +56,7 @@ def _settled(facts: RunMonitorFacts, now: datetime) -> bool:
     if facts.status is not ExecutionStatus.UNKNOWN:
         return True
     last_activity = max(
-        value for value in (facts.started_at, facts.last_event_at) if value is not None
+        value for value in (facts.started_at, facts.last_activity_at) if value is not None
     )
     return last_activity <= now - timedelta(seconds=RUN_SETTLE_SECONDS)
 
@@ -61,9 +65,9 @@ def _run_metrics(facts: RunMonitorFacts) -> dict[str, bool]:
     metrics: dict[str, bool] = {}
     if facts.status is not ExecutionStatus.UNKNOWN:
         metrics["run_failed"] = facts.status.value in _FAILED
-    # Omitted events can hide a failure, so a capture-limited run measures no
-    # event metric instead of reporting a clean run.
-    if facts.capture_limited:
+    # Omitted events can hide a failure, so a run with partial events measures
+    # no event metric instead of reporting a clean run.
+    if facts.events_partial:
         return metrics
     tool_results = [
         item for item in facts.event_counts

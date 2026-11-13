@@ -871,6 +871,13 @@ class InMemoryStorage:
                     for (scope, run_id, _), event in self._agent_events.items()
                     if scope == tenant_id
                 ),
+                (turn for (scope, _, _), turn in self._agent_turns.items() if scope == tenant_id),
+                {
+                    source_id: (source.source_kind,
+                                self._local_source_revisions.get((scope, source_id)))
+                    for (scope, source_id), source in self._import_sources.items()
+                    if scope == tenant_id
+                },
             )
 
     def load_logical_session_monitor_evidence(
