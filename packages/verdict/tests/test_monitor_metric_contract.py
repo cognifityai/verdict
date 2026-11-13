@@ -17,6 +17,7 @@ from verdict.monitoring import (
     monitor_snapshot_from_json,
     monitor_snapshot_to_json,
     plan_historical_manifest,
+    plan_prospective_manifest,
     trace_monitor_units,
 )
 from verdict.schema import Trace
@@ -46,6 +47,11 @@ CALLS = RESPONSE_TOOL_CALLS_TAG
         ("", {}, "completed", None),
         ("", {}, None, None),
         ("", {CALLS: "not-a-count"}, "completed", None),
+        # Unicode digits pass str.isdigit() but are not counts; neither is an
+        # absurdly long digit run.
+        ("", {CALLS: "\u00b2"}, "completed", None),
+        ("", {CALLS: "\u0663"}, "completed", None),
+        ("", {CALLS: "9" * 5000}, "completed", None),
         (None, {CALLS: "0"}, "stop", None),
     ],
 )
@@ -159,3 +165,44 @@ def test_unknown_contract_version_is_rejected() -> None:
     _policy_value, manifest, _comparison = _snapshot()
     with pytest.raises(ValueError, match="metric contract version"):
         replace(manifest, metric_contract_version=METRIC_CONTRACT_VERSION + 1)
+
+
+def test_direct_planner_refuses_to_extend_a_legacy_reference() -> None:
+    """Adversarial: a successor must not pair a v0 reference with v1 measurements."""
+    policy, manifest, _comparison = _snapshot()
+    legacy = replace(manifest, metric_contract_version=0)
+    traces = [_trace(index, response_redacted="ok", tags={CALLS: "0"}) for index in range(80, 120)]
+    with pytest.raises(ValueError, match="re-bootstrap"):
+        plan_prospective_manifest(legacy, trace_monitor_units(traces), policy)
+
+
+def test_preview_tolerates_a_malformed_tool_call_count_tag(tmp_path) -> None:
+    """Real API path: a stored tag the SDK never writes must not break preview."""
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import create_app
+    from verdict.storage import SQLiteStorage
+
+    database = tmp_path / "traces.db"
+    storage = SQLiteStorage(str(database))
+    try:
+        for index in range(80):
+            storage.insert_trace(replace(_trace(index, response_redacted="", finish_reason="completed",
+                                              tags={CALLS: "²" if index % 2 else "0"}),
+                                       tenant_id="tenant-a"))
+    finally:
+        storage.close()
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}", tenant_id="tenant-a")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post("/api/monitor/preview", headers={"X-Verdict-Setup": token}, json={
+                "analysisUnit": "trace", "windowMode": "count", "referenceRatio": 0.5,
+                "groupingMode": "none", "minimumReference": 30, "minimumCurrent": 30,
+            })
+
+    response = asyncio.run(preview())
+    assert response.status_code == 200, response.text
