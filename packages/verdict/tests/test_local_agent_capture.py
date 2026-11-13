@@ -4918,8 +4918,10 @@ def test_legacy_coverage_bootstrap_changes_insights_fingerprint_without_source_e
 @pytest.mark.parametrize("partial_day_index", [2, 3])
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
 def test_incomplete_local_day_withholds_token_comparison_until_rescan(
-    tmp_path: Path, partial_day_index: int, backend: str,
+    tmp_path: Path, partial_day_index: int, backend: str, monkeypatch,
 ) -> None:
+    monkeypatch.setattr("verdict.dashboard.app._now_utc",
+                        lambda: datetime.fromisoformat("2026-10-14T12:00:00+00:00"))
     import asyncio
 
     import httpx
