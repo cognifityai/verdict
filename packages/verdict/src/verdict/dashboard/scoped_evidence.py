@@ -2,16 +2,21 @@
 
 Producers may use the existing ``evaluation_capture`` context event to declare
 request/response/sources roles. Absence of that event is deliberately unknown.
+
+References are short positional labels (``T1`` turn, ``Q1`` request, ``R1``
+response, ``E1`` event) assigned in chronological order. They carry no stored
+identifier, so neither a judge request nor a saved result holds an encoded form
+of a source, session, run, turn, or event ID that redaction cannot recognize.
 """
 
 from __future__ import annotations
 
 import json
 from datetime import datetime
-from urllib.parse import quote
 
 _ROLES = {"substantive", "summary", "count", "reference", "missing", "unknown"}
 _NONCONTENT = {"summary", "count", "reference", "missing", "conflicting"}
+_UNUSABLE_STATUSES = {"failed", "timed_out", "cancelled"}
 
 
 def _time(value):
@@ -22,11 +27,31 @@ def _time(value):
         return None
 
 
+def _has_body(value) -> bool:
+    """A source body has at least one non-blank leaf; empty containers do not count."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(_has_body(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_body(item) for item in value)
+    return value is not None
+
+
+def _usable_source(event: dict) -> bool:
+    """Only a completed or unknown-status, non-error event with a body is source evidence."""
+    attributes = event["attributes"]
+    fields = ("text", "value") if event["type"] == "context" else ("result",)
+    return (attributes.get("available") is not False and attributes.get("is_error") is not True
+            and event.get("status") not in _UNUSABLE_STATUSES
+            and any(_has_body(attributes.get(field)) for field in fields))
+
+
 def paired_evidence(turns: list[dict], events: list[dict], *, source_kind: str,
                     session_id: str) -> dict:
     """Project only recorded evidence, preserving provenance and time limits."""
-    prefix = "/".join(quote(value, safe="") for value in (source_kind, session_id))
     pairs, documents = [], {}
+    event_labels = {}
     run_starts = {}
     for turn in sorted(turns, key=lambda t: (t["runId"], t["sequence"], t["turnId"])):
         start = _time(turn["startedAt"])
@@ -37,7 +62,7 @@ def paired_evidence(turns: list[dict], events: list[dict], *, source_kind: str,
     chronology = True
     previous_end = None
     for index, turn in enumerate(ordered):
-        key = f"{prefix}/{quote(turn['runId'], safe='')}/{quote(turn['turnId'], safe='')}"
+        key = str(index + 1)
         start, end = _time(turn["startedAt"]), _time(turn.get("endedAt"))
         if start is None or end is None or end < start or (index and (
                 previous_end is None or start <= previous_end)):
@@ -65,40 +90,36 @@ def paired_evidence(turns: list[dict], events: list[dict], *, source_kind: str,
             if (turn[f"{field}State"] != "present" or turn[f"{field}Truncated"]
                     or not isinstance(turn[field], str) or not turn[field].strip()):
                 roles[field] = "missing"
-            reference = f"{field}:{key}"
+            reference = f"{'Q' if field == 'request' else 'R'}{key}"
             documents[reference] = {
-                "text": turn[field] or "", "turnReference": f"turn:{key}",
+                "text": turn[field] or "", "turnReference": f"T{key}",
                 "occurredAt": turn["startedAt"] if field == "request" else turn.get("endedAt"),
                 "kind": field, "contentRole": roles[field],
             }
         for event in selected:
-            event_key = f"{prefix}/{quote(turn['runId'], safe='')}/{quote(event['eventId'], safe='')}"
-            attributes = event["attributes"]
-            fields = ("text", "value") if event["type"] == "context" else ("result",)
-            source_available = attributes.get("available") is not False and any(
-                attributes.get(field) not in (None, "", {}, []) for field in fields
-            )
-            documents[f"event:{event_key}"] = {
+            label = event_labels.setdefault((event["runId"], event["eventId"]), f"E{len(event_labels) + 1}")
+            documents[label] = {
                 "text": json.dumps(event["attributes"], ensure_ascii=False, sort_keys=True),
-                "turnReference": f"turn:{key}", "occurredAt": event["occurredAt"],
+                "turnReference": f"T{key}", "occurredAt": event["occurredAt"],
                 "kind": ("capture_provenance" if event["type"] == "context"
                          and event["attributes"].get("name") == "evaluation_capture" else event["type"]),
-                "contentRole": roles["sources"] if source_available else "missing",
+                "status": event.get("status"),
+                "contentRole": roles["sources"] if _usable_source(event) else "missing",
             }
-        source_refs = [ref for ref, doc in documents.items() if doc["turnReference"] == f"turn:{key}"
+        source_refs = [ref for ref, doc in documents.items() if doc["turnReference"] == f"T{key}"
                        and doc["kind"] in {"context", "tool_result"}
                        and doc["contentRole"] != "missing"]
         if (roles["sources"] in {"substantive", "unknown"} and not source_refs
                 and (roles["sources"] == "substantive" or any(
-                    doc["turnReference"] == f"turn:{key}" and doc["kind"] in {"context", "tool_result"}
+                    doc["turnReference"] == f"T{key}" and doc["kind"] in {"context", "tool_result"}
                     for doc in documents.values()))):
             roles["sources"] = "missing"
         pairs.append({
-            "reference": f"turn:{key}", "sourceKind": source_kind, "sourceSessionId": session_id,
+            "reference": f"T{key}", "sourceKind": source_kind, "sourceSessionId": session_id,
             "runId": turn["runId"], "turnId": turn["turnId"], "sequence": turn["sequence"],
             "startedAt": turn["startedAt"], "endedAt": turn.get("endedAt"),
             "request": turn["request"], "response": turn["response"],
-            "requestReference": f"request:{key}", "responseReference": f"response:{key}",
+            "requestReference": f"Q{key}", "responseReference": f"R{key}",
             "sourceReferences": source_refs, "capture": roles, "captureProvenance": provenance,
         })
     indices = {pair["reference"]: index for index, pair in enumerate(pairs)}

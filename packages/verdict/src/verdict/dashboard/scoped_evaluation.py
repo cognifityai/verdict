@@ -443,8 +443,24 @@ def _raw_projection(storage, tenant: str, config: dict[str, Any],
     return _finish_evidence(evidence)
 
 
+_SIZE_LIMITS = {"evidence_limit", "run_limit", "turn_limit", "event_limit"}
+_NO_PAIRS = {"turnPairs": [], "documents": {}, "chronologyCertain": False}
+
+
 def _attach_pairs(evidence: dict, paired: dict, required: set[str]) -> dict:
     evidence.pop("evidenceFingerprint", None)
+    if evidence["unavailableReason"] in _SIZE_LIMITS:
+        # Oversized evidence is withheld whole, never projected or redacted.
+        paired = dict(_NO_PAIRS)
+    elif paired["turnPairs"]:
+        # Stored turn text was sanitized by whichever release captured it.
+        # Apply the current sanitizer, as the ordinary query/response path
+        # does, before the pairs are fingerprinted, previewed, or sent.
+        paired = redact_structure(json.loads(json.dumps(paired, ensure_ascii=False)))
+        if not isinstance(paired, dict):
+            paired = dict(_NO_PAIRS)
+            evidence["unavailableReason"] = evidence["unavailableReason"] or "redaction_unavailable"
+            evidence["coverage"] = "partial"
     if evidence["unavailableReason"] == "event_order_uncertain":
         paired["chronologyCertain"] = False
     evidence.update(paired)
@@ -475,8 +491,7 @@ def _projection(storage, tenant: str, config: dict[str, Any],
         selected_ids = {turn.turn_id for turn in turns}
         selected_events = [event for event in bundle.events if event.turn_id in selected_ids]
         if len(turns) > _MAX_TURNS or len(selected_events) > _MAX_EVENTS:
-            return _attach_pairs(evidence, {"turnPairs": [], "documents": {}, "chronologyCertain": False},
-                                 {"request", "response"})
+            return _attach_pairs(evidence, dict(_NO_PAIRS), {"request", "response"})
         turn_rows = [{"runId": turn.run_id, "turnId": turn.turn_id, "sequence": turn.sequence,
                       "startedAt": turn.started_at.isoformat(),
                       "endedAt": turn.ended_at.isoformat() if turn.ended_at else None,
@@ -486,7 +501,8 @@ def _projection(storage, tenant: str, config: dict[str, Any],
                      for turn in turns]
         event_rows = [{"runId": bundle.run.run_id, "turnId": event.turn_id,
                        "eventId": event.event_id, "occurredAt": event.occurred_at.isoformat(),
-                       "type": event.event_type.value, "attributes": disclosed_event_attributes(event.attributes),
+                       "type": event.event_type.value, "status": event.status.value,
+                       "attributes": disclosed_event_attributes(event.attributes),
                        "provenance": event.provenance}
                       for event in selected_events]
         paired = paired_evidence(turn_rows, event_rows, source_kind=bundle.session.source_kind,
@@ -517,6 +533,18 @@ def _projection(storage, tenant: str, config: dict[str, Any],
     return _attach_pairs(evidence, {key: evidence[key] for key in (
         "turnPairs", "documents", "chronologyCertain",
     )}, required)
+
+
+def historical_audit_allowed(evidence: dict) -> bool:
+    """Audits also accept partial event capture or uncertain order, which they disclose.
+
+    Turn text must still be complete, and suitability must not be unavailable.
+    Size and shape limits are checked at preview, against the selected rubric.
+    """
+    reason = evidence["unavailableReason"]
+    return (reason in {None, "source_capture_partial", "event_order_uncertain"}
+            and bool(evidence.get("turnPairs"))
+            and evidence["suitability"]["state"] != "unavailable")
 
 
 def _plan(storage, tenant: str, config: dict[str, Any],
@@ -568,10 +596,8 @@ def _plan(storage, tenant: str, config: dict[str, Any],
     fingerprint = hashlib.sha256(_canonical([
         tenant, evidence["evidenceFingerprint"], identity_fp,
     ])).hexdigest()
-    eligible = evidence["coverage"] == "complete" and evidence["suitability"]["state"] != "unavailable"
-    if (audit and evidence["unavailableReason"] in {"source_capture_partial", "event_order_uncertain"}
-            and evidence["suitability"]["state"] != "unavailable"):
-        eligible = True
+    eligible = (historical_audit_allowed(evidence) if audit else
+                evidence["coverage"] == "complete" and evidence["suitability"]["state"] != "unavailable")
     reason = evidence["unavailableReason"]
     if evidence["suitability"]["state"] == "unavailable" and reason is None:
         reason = "required_evidence_unavailable"

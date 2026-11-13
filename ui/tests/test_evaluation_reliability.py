@@ -98,7 +98,7 @@ def audit_reply(evidence, labels=("FAIL", "PASS"), recoveries=None, holistic=Non
                 recovery = {"state": "recovered", "turnReference": later["reference"],
                             "reason": "The specific claim is corrected in this later answer.",
                             "citations": [{"reference": later["responseReference"], "quote": later["response"]}]}
-            findings = [{"id": f"finding-{index}", "reason": "A material geometric claim is false.",
+            findings = [{"reason": "A material geometric claim is false.",
                          "citations": [citation], "recovery": recovery}]
         rows.append({"reference": pair["reference"], "dimensions": {"geometry_check": {
             "original": copy.deepcopy(assessment), "retrospective": copy.deepcopy(assessment),
@@ -208,7 +208,7 @@ def test_final_completion_is_explicitly_distinct_from_historical_accuracy(reliab
 
 @pytest.mark.parametrize("mutation", ["missing_turn", "duplicate_turn", "extra_dimension", "erased_failure",
                                     "wrong_quote", "foreign_reference", "future_original", "no_finding",
-                                    "recovery_same_turn", "duplicate_finding", "missing_assessment"])
+                                    "recovery_same_turn", "judge_finding_id", "missing_assessment"])
 def test_contradictory_structured_reply_is_saved_error_without_retry(reliability_store, mutation):
     storage, url = reliability_store
     storage.replace_agent_run_bundle(history_bundle())
@@ -237,7 +237,8 @@ def test_contradictory_structured_reply_is_saved_error_without_retry(reliability
     elif mutation == "recovery_same_turn":
         first["findings"][0]["recovery"] = {"state": "recovered", "turnReference": evidence["turnPairs"][0]["reference"],
                                             "reason": "Synthetic", "citations": []}
-    elif mutation == "duplicate_finding":
+    elif mutation == "judge_finding_id":
+        # Finding IDs are assigned by the application; a judge-chosen one is an extra key.
         payload["turns"][1]["dimensions"]["geometry_check"]["findings"][0]["id"] = "finding-0"
     else:
         del first["original"]
@@ -360,8 +361,8 @@ def test_repeated_turn_ids_in_separate_runs_are_source_qualified(reliability_sto
     preview = preview_scoped(storage, tenant="local", config=config, storage_url=url)
     pairs = preview["evidencePreview"]["turnPairs"]
     assert pairs[0]["turnId"] == pairs[1]["turnId"]
-    assert pairs[0]["reference"] != pairs[1]["reference"]
-    assert all(first.session.source_kind in pair["reference"] for pair in pairs)
+    assert [pair["reference"] for pair in pairs] == ["T1", "T2"]
+    assert "run-b" not in json.dumps(preview["evidencePreview"]["documents"])
     assert pairs[1]["responseReference"] not in pairs[0]["originalEvidenceReferences"]
     result = run_audit(storage, url, config, AuditProvider(audit_reply(preview["evidencePreview"], recoveries={0: 1})))
     assert result["status"] == "completed"
@@ -554,7 +555,10 @@ def test_source_sequence_disagreement_cannot_imply_later_recovery(reliability_st
 
 def test_large_valid_judge_reply_exceeding_store_limit_is_saved_error(reliability_store):
     storage, url = reliability_store
-    storage.replace_agent_run_bundle(history_bundle(("x" * 970 + " A hexagon has five sides.",)))
+    bundle = history_bundle(("x" * 970 + " A hexagon has five sides.",))
+    # A long request is stored with the result but never repeated in the reply.
+    bundle = replace(bundle, turns=(replace(bundle.turns[0], user_request_redacted="y" * 2_000 + " How many sides?"),))
+    storage.replace_agent_run_bundle(bundle)
     config = audit_config()
     evidence = preview_scoped(storage, tenant="local", config=config, storage_url=url)["evidencePreview"]
     payload = audit_reply(evidence, ("FAIL",))
@@ -567,7 +571,7 @@ def test_large_valid_judge_reply_exceeding_store_limit_is_saved_error(reliabilit
     finding["citations"] = [copy.deepcopy(citation) for _ in range(8)]
     finding["reason"] = "f" * 990
     finding["recovery"]["reason"] = "u" * 990
-    item["findings"] = [{**copy.deepcopy(finding), "id": f"finding-{i}"} for i in range(4)]
+    item["findings"] = [copy.deepcopy(finding) for _ in range(4)]
     assert len(json.dumps(payload).encode()) < 64_000
     from verdict_eval.historical_audit import parse
 
@@ -620,3 +624,119 @@ def test_saved_audit_read_is_independent_of_optional_evaluator(reliability_store
             assert response.json()["turnAssessments"] == result["turnAssessments"]
             assert response.json()["evidenceStatus"] == "current"
     asyncio.run(read_saved())
+
+
+def test_identifiers_never_reach_provider_or_saved_result_in_any_encoding(reliability_store):
+    storage, url = reliability_store
+    email = "synthetic.owner@example.com"
+    base = history_bundle()
+    bundle = replace(
+        base, session=replace(base.session, source_session_id=f"session-{email}"),
+        run=replace(base.run, run_id=f"run-{email}", source_session_id=f"session-{email}"),
+        turns=tuple(replace(turn, run_id=f"run-{email}", turn_id=f"{turn.turn_id}-{email}")
+                    for turn in base.turns),
+    )
+    storage.replace_agent_run_bundle(bundle)
+    config = {**audit_config(), "runId": bundle.run.run_id}
+    preview = preview_scoped(storage, tenant="local", config=config, storage_url=url)
+    provider = AuditProvider(audit_reply(preview["evidencePreview"], recoveries={0: 1}))
+    result = run_audit(storage, url, config, provider)
+    sent = json.dumps(provider.request.messages, ensure_ascii=False)
+    saved = json.dumps(ControlStore(url).history("local", "scoped_evaluation", result["resultId"]))
+    for rendered in (sent, saved, json.dumps(result)):
+        for form in (email, "example.com", "%40", "synthetic.owner"):
+            assert form not in rendered
+    assert result["status"] == "completed"
+
+
+@pytest.mark.parametrize("source", [
+    {"status": ExecutionStatus.COMPLETED, "attributes": {"name": "shape", "text": "   \n"}},
+    {"status": ExecutionStatus.COMPLETED, "attributes": {"name": "shape", "value": {"content": [" "]}}},
+    {"status": ExecutionStatus.FAILED, "attributes": {"name": "shape", "text": "A hexagon has six sides."}},
+    {"status": ExecutionStatus.CANCELLED, "attributes": {"name": "shape", "text": "A hexagon has six sides."}},
+    {"status": ExecutionStatus.COMPLETED, "type": AgentEventType.TOOL_RESULT,
+     "attributes": {"tool_name": "lookup", "result": "A hexagon has six sides.", "is_error": True}},
+    {"status": ExecutionStatus.COMPLETED, "type": AgentEventType.TOOL_RESULT,
+     "attributes": {"tool_name": "lookup", "result": "A hexagon has six sides."}, "usable": True},
+    {"status": ExecutionStatus.COMPLETED, "attributes": {"name": "shape", "text": "A hexagon has six sides."},
+     "usable": True},
+])
+def test_blank_failed_or_error_sources_do_not_satisfy_required_sources(reliability_store, source):
+    storage, url = reliability_store
+    bundle = history_bundle(("A hexagon has six sides.",))
+    event = AgentEvent("source", "turn-0", 0, bundle.turns[0].started_at,
+                       source.get("type", AgentEventType.CONTEXT), source["status"], "synthetic",
+                       source["attributes"], PrivacyClassification.REDACTED)
+    declaration = replace(event, event_id="capture", sequence=1, status=ExecutionStatus.COMPLETED,
+                          event_type=AgentEventType.CONTEXT,
+                          attributes={"name": "evaluation_capture", "value": {"sources": "substantive"}})
+    storage.replace_agent_run_bundle(replace(bundle, events=(event, declaration)))
+    config = audit_config()
+    config["rubric"]["dimensions"][0]["requiredEvidence"].append("sources")
+    preview = preview_scoped(storage, tenant="local", config=config, storage_url=url)
+    usable = source.get("usable", False)
+    assert preview["plannedCalls"] == (1 if usable else 0)
+    assert preview["suitability"]["turns"][0]["sources"] == ("substantive" if usable else "missing")
+
+
+def test_finding_ids_are_assigned_once_and_stay_unique_after_redaction(reliability_store):
+    storage, url = reliability_store
+    storage.replace_agent_run_bundle(history_bundle(("A hexagon has five sides.", "A hexagon has five sides.")))
+    config = audit_config()
+    preview = preview_scoped(storage, tenant="local", config=config, storage_url=url)
+    payload = audit_reply(preview["evidencePreview"], ("FAIL", "FAIL"))
+    first = payload["turns"][0]["dimensions"]["geometry_check"]["findings"]
+    first.append({**copy.deepcopy(first[0]), "reason": "Contact a.person@example.com about the count."})
+    result = run_audit(storage, url, config, AuditProvider(payload))
+    assert result["status"] == "completed"
+
+    async def read_saved():
+        app = create_app(storage=url, tenant_id="local")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            return (await client.get(f"/api/scoped/result/{result['resultId']}")).json()
+    saved = asyncio.run(read_saved())
+    for findings in (result["historicalFindings"], saved["historicalFindings"]):
+        assert [finding["id"] for finding in findings] == ["F1", "F2", "F3"]
+
+
+def test_audit_reapplies_current_sanitizer_to_text_stored_by_an_earlier_release(reliability_store):
+    storage, url = reliability_store
+    secret = "sk-proj-" + "Q" * 40
+    storage.replace_agent_run_bundle(history_bundle(("A hexagon has six sides.",)))
+    # An earlier release's sanitizer may have stored text the current one removes.
+    stored = f"A hexagon has six sides. Key {secret}"
+    if url.startswith("sqlite"):
+        import sqlite3
+
+        with sqlite3.connect(url.removeprefix("sqlite:///")) as connection:
+            connection.execute("UPDATE agent_turns SET final_response_redacted = ?", (stored,))
+    else:
+        import psycopg
+
+        with psycopg.connect(url, autocommit=True) as connection:
+            connection.execute("UPDATE agent_turns SET final_response_redacted = %s", (stored,))
+    config = audit_config()
+    preview = preview_scoped(storage, tenant="local", config=config, storage_url=url)
+    assert secret not in json.dumps(preview)
+    provider = AuditProvider(audit_reply(preview["evidencePreview"], ("PASS",)))
+    result = run_audit(storage, url, config, provider)
+    assert result["status"] == "completed"
+    assert secret not in json.dumps(provider.request.messages)
+    assert secret not in json.dumps(ControlStore(url).history("local", "scoped_evaluation", result["resultId"]))
+
+
+def test_audit_only_selection_is_offered_by_the_read_models(reliability_store):
+    storage, url = reliability_store
+    bundle = history_bundle(("A hexagon has six sides.",))
+    marker = AgentEvent("limit", "turn-0", 0, bundle.turns[0].started_at,
+                        AgentEventType.OUTCOME, ExecutionStatus.UNKNOWN, "verdict:capture_limit",
+                        {"name": "capture_limit", "value": "bounded"}, PrivacyClassification.REDACTED)
+    storage.replace_agent_run_bundle(replace(bundle, events=(marker,)))
+    run = build_agent_runs_bundle(url, tenant="local", run_ids=("run-a",))["runs"][0]
+    assert run["scopedEvaluationEligible"] is False
+    assert run["historicalAuditAvailable"] is True
+    assert preview_scoped(storage, tenant="local", config=audit_config(), storage_url=url)["plannedCalls"] == 1
+    assert preview_scoped(storage, tenant="local", config=_config(), storage_url=url)["plannedCalls"] == 0
+    storage.replace_agent_run_bundle(replace(bundle, turns=(replace(bundle.turns[0], response_truncated=True),),
+                                             events=(marker,)))
+    assert build_agent_runs_bundle(url, tenant="local", run_ids=("run-a",))["runs"][0]["historicalAuditAvailable"] is False

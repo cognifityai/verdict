@@ -18,6 +18,8 @@ the product is refined.
 - One explicitly approved bounded historical audit for small session, run, or
   adjacent-turn selections, with separate original/retrospective assessments,
   explicit aggregation and evidence authority, and recovery per finding.
+  Audit evidence uses short positional references and current redaction, and
+  the audit stays available when only event capture is partial.
 - Scoped evidence suitability disclosures preserve explicit capture provenance
   and distinguish substantive content from summaries, counts, and references.
 

@@ -207,13 +207,24 @@ def dimension_fields(item: object) -> DimensionFields:
 
 
 def decode_judge_object(text: object) -> dict:
-    """Strict bounded JSON object for the historical audit's single answer."""
+    """The single JSON object of a historical-audit reply.
+
+    Uses the same bounded scan as the trace judge, so a Markdown fence or a
+    sentence around the object is tolerated. Only an object with the audit's
+    top-level ``turns`` key is an answer; when the reply's own object is
+    malformed the scan can still decode its inner objects, which are not
+    answers. Exactly one answer is required: a draft followed by a correction
+    is two answers, not one.
+    """
     if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_OUTPUT_BYTES:
         raise JudgeOutputError("invalid audit output size or type")
     try:
-        value = _DECODER.decode(text.strip())
-    except (ValueError, RecursionError) as exc:
+        candidates = list(_candidates(text))
+    except RecursionError as exc:
         raise JudgeOutputError("invalid audit JSON") from exc
-    if not isinstance(value, dict):
-        raise JudgeOutputError("audit output must be an object")
-    return value
+    answers = [candidate for candidate in candidates if isinstance(candidate, dict) and "turns" in candidate]
+    if len(answers) > 1:
+        raise JudgeOutputError("multiple audit answers")
+    if not answers:
+        raise JudgeOutputError("invalid audit JSON")
+    return answers[0]

@@ -888,7 +888,10 @@ def build_agent_session_bundle(
     )
     if not isinstance(redacted, dict):
         raise DashboardBundleLimitError("bounded session report exceeded redaction budget")
-    from verdict.dashboard.scoped_evaluation import session_projection_from_report
+    from verdict.dashboard.scoped_evaluation import (
+        historical_audit_allowed,
+        session_projection_from_report,
+    )
 
     scoped_evidence = session_projection_from_report(
         redacted, session_id=session_id, source_kind=source_kind,
@@ -898,6 +901,7 @@ def build_agent_session_bundle(
     redacted["scopedEvaluationUnavailableReason"] = (scoped_evidence["unavailableReason"]
                                                     or scoped_evidence["suitability"]["unavailableReason"])
     redacted["scopedEvaluationSuitability"] = scoped_evidence["suitability"]
+    redacted["historicalAuditAvailable"] = historical_audit_allowed(scoped_evidence)
     return redacted
 
 
@@ -1141,7 +1145,7 @@ def build_agent_runs_bundle(
         )
         runs = []
         linked_trace_ids: dict[str, set[str]] = defaultdict(set)
-        from verdict.dashboard.scoped_evaluation import _projection
+        from verdict.dashboard.scoped_evaluation import _projection, historical_audit_allowed
 
         for bundle in bundles:
             local_revision = local_revisions.get(bundle.run.run_id)
@@ -1241,6 +1245,7 @@ def build_agent_runs_bundle(
                 "scopedEvaluationUnavailableReason": (scoped_evidence["unavailableReason"]
                                                        or scoped_evidence["suitability"]["unavailableReason"]),
                 "scopedEvaluationSuitability": scoped_evidence["suitability"],
+                "historicalAuditAvailable": historical_audit_allowed(scoped_evidence),
             })
             linked_trace_ids[bundle.run.run_id].update(
                 event.trace_id for event in bundle.events if event.trace_id is not None

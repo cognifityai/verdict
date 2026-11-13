@@ -29,22 +29,31 @@ truth. If authority or support is insufficient, use UNCLEAR. A complete actual
 answer that demonstrably omits a requirement may FAIL. Respect explicit writing
 requirements. Captured summary/count/reference is not the actual answer or source.
 
-Reply with exactly one JSON object, no prose or fences:
-{"turns":[{"reference":"<turn reference>","dimensions":{"<dimension>":{
+References are the short labels supplied in the evidence: T1 is a turn, Q1 its
+request, R1 its response, E1 an event. Copy them exactly.
+
+Reply with exactly one JSON object and nothing else. Shape, shown for turn T1:
+{"turns":[{"reference":"T1","dimensions":{"<dimension>":{
 "original":{"verdict":"PASS|FAIL|UNCLEAR","reason":"<short reason>",
-"citations":[{"reference":"<leaf reference>","quote":"<exact text>"}]},
-"retrospective":{"verdict":"PASS|FAIL|UNCLEAR","reason":"<short reason>","citations":[]},
-"findings":[{"id":"<unique finding id>","reason":"<specific violation>","citations":[],
-"recovery":{"state":"recovered|unresolved|unclear","turnReference":null,
-"reason":"<specific finding's recovery only>","citations":[]}}]}}}],
+"citations":[{"reference":"R1","quote":"<exact text from R1>"}]},
+"retrospective":{"verdict":"PASS|FAIL|UNCLEAR","reason":"<short reason>",
+"citations":[{"reference":"R1","quote":"<exact text from R1>"}]},
+"findings":[{"reason":"<specific violation>",
+"citations":[{"reference":"R1","quote":"<exact text from R1>"}],
+"recovery":{"state":"unresolved|unclear","turnReference":null,
+"reason":"<this finding's recovery only>","citations":[]}}]}}}],
 "holistic":{"<only dimensions declaring holistic>":{"verdict":"PASS|FAIL|UNCLEAR",
-"reason":"<whole-selection judgment>","citations":[]}}}
+"reason":"<whole-selection judgment>",
+"citations":[{"reference":"R1","quote":"<exact text from R1>"}]}}}
+A recovered finding instead uses "recovery":{"state":"recovered","turnReference":"T2",
+"reason":"<how T2 corrects it>","citations":[{"reference":"R2","quote":"<exact text from R2>"}]}.
 
 Include every pair and dimension exactly once, in supplied order. Use an empty
 holistic object if none are declared. No missing entries, extra keys, or invented
-references. Each scored assessment cites the response it assesses, with exact
-quotes. Every retrospective FAIL has at least one specific finding citing that
-response. Findings are empty otherwise. An original FAIL must remain retrospective
+references. Every PASS or FAIL, original or retrospective, cites the response it
+assesses with an exact quote; UNCLEAR may cite nothing. Every retrospective FAIL
+has at least one specific finding citing that response. Findings are empty
+otherwise. An original FAIL must remain retrospective
 FAIL. Each finding has its own recovery object. Recovered requires a strictly later
 turnReference and a quote from that later response; a correction introducing a new
 error is also assessed as a separate finding on the later turn. Unresolved or
@@ -87,12 +96,23 @@ def shape_available(evidence: dict, policy: dict, max_tokens: int) -> bool:
             and max_tokens >= 2048)
 
 
+# Stored identifiers stay local: the judge needs positions, text, and times only.
+_JUDGE_PAIR_FIELDS = (
+    "reference", "startedAt", "endedAt", "request", "response", "requestReference",
+    "responseReference", "sourceReferences", "capture", "originalEvidenceReferences",
+    "laterEvidenceReferences", "unplacedEvidenceReferences",
+)
+
+
 def messages(evidence: dict, rubric, policy: dict) -> list[dict]:
+    suitability = {key: value for key, value in evidence["suitability"].items() if key != "turns"}
     payload = {
         "rubric": {d.name: {"description": d.description, **policy[d.name]} for d in rubric.dimensions},
-        "evidence": {key: evidence[key] for key in (
-            "turnPairs", "documents", "chronologyCertain", "suitability", "coverage",
-        )},
+        "evidence": {
+            "turnPairs": [{key: pair[key] for key in _JUDGE_PAIR_FIELDS} for pair in evidence["turnPairs"]],
+            "documents": evidence["documents"], "chronologyCertain": evidence["chronologyCertain"],
+            "suitability": suitability, "coverage": evidence["coverage"],
+        },
     }
     return [{"role": "system", "content": SYSTEM_PROMPT + "\n" + _PROMPT},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)}]
@@ -144,7 +164,7 @@ def parse(text: str, evidence: dict, policy: dict) -> dict:
     rows = output["turns"]
     if not isinstance(rows, list) or len(rows) != len(pairs):
         raise JudgeOutputError("missing or extra audit turns")
-    all_refs, seen_findings = set(docs), set()
+    all_refs = set(docs)
     verdicts = {name: [] for name in policy}
     ambiguous = {name: False for name in policy}
     cited_refs = {name: set() for name in policy}
@@ -168,11 +188,7 @@ def parse(text: str, evidence: dict, policy: dict) -> dict:
                     or bool(findings) != (retrospective == "fail")):
                 raise JudgeOutputError("audit failure and findings contradict")
             for finding in findings:
-                _object(finding, {"id", "reason", "citations", "recovery"})
-                finding_id = _text(finding["id"])
-                if finding_id in seen_findings:
-                    raise JudgeOutputError("duplicate audit finding id")
-                seen_findings.add(finding_id)
+                _object(finding, {"reason", "citations", "recovery"})
                 _text(finding["reason"])
                 refs = _citations(finding["citations"], all_refs, docs)
                 cited_refs[name].update(refs)
@@ -194,7 +210,10 @@ def parse(text: str, evidence: dict, policy: dict) -> dict:
                 elif recovery["turnReference"] is not None and target is None:
                     raise JudgeOutputError("invalid recovery turn")
                 ambiguous[name] |= state == "unclear"
-                historical_findings.append({"turnReference": pair["reference"], "dimension": name, **finding})
+                # The application, not the judge, names findings: an identifier
+                # stays unique through result redaction and cannot carry content.
+                historical_findings.append({"id": f"F{len(historical_findings) + 1}",
+                                            "turnReference": pair["reference"], "dimension": name, **finding})
             verdicts[name].append(retrospective)
             turn_assessments.append({"turnReference": pair["reference"], "dimension": name,
                                      "original": item["original"], "retrospective": item["retrospective"]})
