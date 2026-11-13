@@ -12,6 +12,8 @@ the product is refined.
   timed-out runs, runs with a failed tool result, and runs with a failed model
   call, with Fisher's exact test, Benjamini–Hochberg correction and the minimum
   effect, overall or by agent name. Run comparisons are not saved as monitors.
+  Runs with possibly incomplete events, including unfinished or unverified
+  local histories, measure no event outcome; a new turn keeps a run open.
 - The comparison settings expose the minimum change that can raise an alert.
 
 ### Changed

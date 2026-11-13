@@ -587,13 +587,16 @@ Benjamini–Hochberg correction and minimum effect:
   model call reported a status.
 
 An outcome the source did not report is left out, never counted as success.
-A run whose events were truncated at capture measures no tool or model-call
-outcome, because the omitted events may contain a failure. Local Claude Code
+A run whose events may be incomplete measures no tool or model-call outcome,
+because the missing events may contain a failure. That covers events truncated
+at capture and a local Claude Code or Codex history that is incomplete or not
+yet verified (for example, a final line still being written), the same runs the
+run view marks partial. Local Claude Code
 and Codex histories do not report a run status, so `run_failed` applies only
 to sources that do, such as `verdict.agent_run(...)`.
 
-A run joins a comparison once it has ended, or once it has had no new event for
-30 minutes. A run that is still open holds back every run that started after it,
+A run joins a comparison once it has ended, or once it has had no new event and
+no turn start or end for 30 minutes. A run that is still open holds back every run that started after it,
 so short runs that finish first cannot fill a cohort on their own. Membership is
 ordered by run start time. Grouping is either none or the recorded agent name.
 
