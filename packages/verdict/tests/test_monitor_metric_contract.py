@@ -42,7 +42,13 @@ CALLS = RESPONSE_TOOL_CALLS_TAG
         # A provider stop reason does too.
         ("", {}, "stop", True),
         ("", {}, "end_turn", True),
-        ("", {}, "length", True),
+        # A reply cut off at its output limit is not decidable, even with a
+        # recorded zero count; any text it did produce is still an answer.
+        ("", {}, "length", None),
+        ("", {}, "max_tokens", None),
+        ("", {}, "FinishReason.MAX_TOKENS", None),
+        ("", {CALLS: "0"}, "incomplete", None),
+        ("Partial answer", {CALLS: "0"}, "incomplete", False),
         # Without either, a tool call cannot be ruled out.
         ("", {}, "completed", None),
         ("", {}, None, None),

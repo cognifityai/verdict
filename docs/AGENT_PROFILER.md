@@ -77,7 +77,8 @@ Claude Code records a failed provider request, such as a usage limit, an
 authentication failure or a server error, as an assistant message marked as an
 API error. Local history import stores that model call as failed, with the
 source's error code and HTTP status as the provider error, for example
-`rate_limit (HTTP 429)`. Its notice text is not model output, so the call is not
+`rate_limit (HTTP 429)`. This also applies when the error is reported on a
+message that had already streamed content. Its notice text is not model output, so the call is not
 eligible for response judging. The run's status is unchanged, because Claude
 Code can continue the same run after the limit resets. Rescanning history that
 an earlier release imported reclassifies these calls without changing evidence

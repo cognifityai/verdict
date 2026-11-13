@@ -20,7 +20,7 @@ the product is refined.
 
 - Monitor's blank-response metric no longer counts a reply that asks the
   application to run a tool, and leaves out an empty reply whose capture cannot
-  rule out a tool call. Calls with a recorded provider error measure only
+  rule out a tool call or that stopped at its output limit. Calls with a recorded provider error measure only
   `provider_error`. Each frozen cohort records its metric-definition version;
   monitors with an earlier reference require a new reviewed reference.
 
@@ -28,8 +28,9 @@ the product is refined.
 
 - Claude Code API-error messages (usage limits, authentication and server
   errors) import as failed model calls with the source error code and HTTP
-  status, instead of successful calls. Rescanning previously imported history
-  reclassifies them in place.
+  status, instead of successful calls, including when the error is reported on
+  a message that had already streamed content. Rescanning previously imported
+  history reclassifies them in place.
 - SDK capture records the number of client tool calls in each completed
   provider response, including zero (`verdict.response_tool_calls`), for OpenAI
   chat and Responses, Anthropic and Google, streaming included. Google captures no longer render function-call

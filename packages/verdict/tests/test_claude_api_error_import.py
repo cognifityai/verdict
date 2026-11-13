@@ -111,6 +111,43 @@ def test_api_error_rows_become_failed_provider_calls(tmp_path: Path, kind: str) 
         storage.close()
 
 
+@pytest.mark.parametrize("kind", ["memory", "sqlite", "buffered"])
+@pytest.mark.parametrize("appended_later", [False, True])
+def test_late_api_error_on_an_existing_message_fails_that_call(
+    tmp_path: Path, kind: str, appended_later: bool,
+) -> None:
+    """Content streamed for a message, then the same message reported an API error."""
+    root = tmp_path / "claude"
+    records = [
+        {
+            "timestamp": "2026-08-30T11:00:00Z", "type": "user", "uuid": "user-1",
+            "sessionId": "claude-session-1", "message": {"content": "refactor the parser"},
+        },
+        # Still streaming: no stop reason yet.
+        _assistant("part-1", "msg-1", "Starting the refactor.",
+                   timestamp="2026-08-30T11:00:01Z", stop_reason=None),
+    ]
+    late_error = _assistant(
+        "late-1", "msg-1", "Synthetic overload notice.", timestamp="2026-08-30T11:00:02Z",
+        stop_reason="stop_sequence", isApiErrorMessage=True, error="overloaded", apiErrorStatus=529,
+    )
+    storage = _storage(kind, tmp_path, "store")
+    try:
+        if appended_later:
+            _write_jsonl(root / "session.jsonl", records)
+            capture_local_agents(storage, tenant_id="local", claude_root=root)
+            assert [e.status for e in _model_events(storage)] == [ExecutionStatus.COMPLETED]
+        _write_jsonl(root / "session.jsonl", [*records, late_error])
+        capture_local_agents(storage, tenant_id="local", claude_root=root)
+
+        assert [(e.status, e.attributes.get("error")) for e in _model_events(storage)] == [
+            (ExecutionStatus.FAILED, "overloaded (HTTP 529)"),
+        ]
+        assert [t.error for t in storage.list_traces(tenant_id="local")] == ["overloaded (HTTP 529)"]
+    finally:
+        storage.close()
+
+
 def test_api_error_classification_ignores_message_text(tmp_path: Path) -> None:
     root = tmp_path / "claude"
     records = _records()
