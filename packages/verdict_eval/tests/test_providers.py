@@ -318,12 +318,51 @@ def test_openai_adapter_sends_max_completion_tokens_and_never_max_tokens() -> No
     [body] = requests
     assert body["max_completion_tokens"] == output_token_ceiling(256, "gpt-test") == 256
     assert "max_tokens" not in body
+    assert "response_format" not in body
     assert body["temperature"] == 0.0
     assert body["messages"][0] == {"role": "system", "content": "policy"}
     assert response.text == '{"relevance": {}}'
     assert response.finish_reason == "stop"
     assert response.input_tokens == 9
     assert response.output_tokens == 4
+
+
+def test_openai_adapter_sends_json_mode_only_when_asked() -> None:
+    from verdict_eval.providers import CompletionRequest
+
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return sdk_httpx.Response(200, json=_chat_completion('{"turns": []}', "stop"))
+
+    adapter, sdk_httpx = _openai_with_transport(respond)
+    response = adapter.complete(CompletionRequest(
+        model="gpt-test", max_tokens=256, json_output=True,
+        messages=[{"role": "system", "content": "Reply with one JSON object."},
+                  {"role": "user", "content": "q"}],
+    ))
+
+    [body] = requests
+    assert body["response_format"] == {"type": "json_object"}
+    assert response.text == '{"turns": []}'
+
+
+def test_anthropic_adapter_request_is_unchanged_by_json_output() -> None:
+    from verdict_eval.providers import AnthropicAdapter, CompletionRequest
+
+    requests = []
+    adapter = object.__new__(AnthropicAdapter)
+    adapter.supports_temperature = True
+    for json_output in (False, True):
+        captured = {}
+        adapter._client = _fake_anthropic_stream(captured)
+        adapter._complete_once(CompletionRequest(
+            model="claude-test", messages=[{"role": "user", "content": "q"}], json_output=json_output,
+        ))
+        requests.append(captured)
+
+    assert requests[0] == requests[1]
 
 
 def test_openai_adapter_reports_a_reply_cut_off_by_reasoning() -> None:

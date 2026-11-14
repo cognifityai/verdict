@@ -19,7 +19,8 @@ the product is refined.
   adjacent-turn selections, with separate original/retrospective assessments,
   explicit aggregation and evidence authority, and recovery per finding.
   Audit evidence uses short positional references and current redaction, and
-  the audit stays available when only event capture is partial.
+  the audit stays available when only event capture is partial. OpenAI audit
+  judges are asked for JSON mode output.
 - Scoped evidence suitability disclosures preserve explicit capture provenance
   and distinguish substantive content from summaries, counts, and references.
 

@@ -21,6 +21,11 @@ class CompletionRequest:
     # The answer budget. Adapters send ``output_token_ceiling(max_tokens)`` to
     # the provider so a model's built-in reasoning cannot consume the answer.
     max_tokens: int = 1024
+    # Ask for a reply that is one syntactically valid JSON object. Only
+    # OpenAIAdapter acts on it (Chat Completions JSON mode); the other adapters
+    # send the same request as before. JSON mode checks syntax, not fields, so
+    # the caller still decodes and validates the reply.
+    json_output: bool = False
 
 
 # Models with built-in reasoning spend output tokens on thinking before the
@@ -182,7 +187,9 @@ class OpenAIAdapter:
     OpenAI-compatible server behind ``OPENAI_BASE_URL`` must honor it; Ollama
     0.34 ignores it, so a local judge there runs without an output ceiling.
     Omits the temperature for reasoning families, which accept only their
-    default. Includes automatic exponential-backoff retry on transient errors.
+    default. Sends JSON mode when the request asks for JSON output; the
+    messages must then mention JSON, which OpenAI requires. Includes automatic
+    exponential-backoff retry on transient errors.
     """
 
     name = "openai"
@@ -212,6 +219,8 @@ class OpenAIAdapter:
         }
         if self.temperature_supported(req.model):
             kwargs["temperature"] = req.temperature
+        if req.json_output:
+            kwargs["response_format"] = {"type": "json_object"}
         resp = self._client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         usage = getattr(resp, "usage", None)

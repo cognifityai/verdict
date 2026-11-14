@@ -109,3 +109,34 @@ def test_malformed_audit_object_is_invalid_json_not_its_inner_objects():
     with pytest.raises(JudgeOutputError, match="invalid audit JSON"):
         decode_judge_object(malformed + "\n" + reply)
     assert decode_judge_object(reply)["turns"]
+
+
+def test_only_the_historical_audit_requests_json_output():
+    from verdict_eval.historical_audit import execute
+
+    response = "A hexagon has five sides."
+    policy = {"geometry": {"aggregation": "holistic", "evidenceAuthority": "public_knowledge",
+                           "requiredEvidence": ["request", "response"]}}
+    requests = []
+
+    def reply(request):
+        requests.append(request)
+        return _literal_template_reply("geometry", response)
+
+    evidence = _single_turn_evidence(response)
+    evidence["suitability"] = {"state": "available"}
+    evidence["turnPairs"][0].update(
+        startedAt="2026-01-01T00:00:00Z", endedAt="2026-01-01T00:00:01Z", request="Q1", response="R1",
+        sourceReferences=[], capture="complete", unplacedEvidenceReferences=[],
+    )
+    rubric = Rubric("synthetic", "1", (RubricDimension("geometry", "State facts correctly."),))
+    result = execute(FakeProvider(reply), model="synthetic-judge", max_tokens=4096,
+                     evidence=evidence, rubric=rubric, policy=policy)
+    assert result["dimensions"][0]["verdict"] == "fail"
+
+    def trace_reply(request):
+        requests.append(request)
+        return json.dumps({"delivery": {"verdict": "FAIL", "reasoning": "Synthetic"}})
+
+    Judge(FakeProvider(trace_reply), "synthetic-judge", RUBRIC).score(query="Question", response="Answer")
+    assert [request.json_output for request in requests] == [True, False]

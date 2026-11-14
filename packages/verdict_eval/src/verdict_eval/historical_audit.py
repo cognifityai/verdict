@@ -11,7 +11,7 @@ from verdict_eval.judge import SYSTEM_PROMPT
 from verdict_eval.judge_output import JudgeOutputError, decode_judge_object, is_truncated
 from verdict_eval.providers import CompletionRequest
 
-VERSION = "historical_audit_v1"
+VERSION = "historical_audit_v2"  # v2: requests JSON output
 _AGGREGATIONS = {"historical_all_turns", "final_response", "holistic"}
 _AUTHORITIES = {"recorded_sources", "public_knowledge"}
 _FIELDS = {"request", "response", "sources"}
@@ -246,7 +246,7 @@ def parse(text: str, evidence: dict, policy: dict) -> dict:
 def execute(provider, *, model: str, max_tokens: int, evidence: dict, rubric, policy: dict) -> dict:
     with workload_context("judge"):
         response = provider.complete(CompletionRequest(
-            model=model, max_tokens=max_tokens, temperature=0.0,
+            model=model, max_tokens=max_tokens, temperature=0.0, json_output=True,
             messages=messages(evidence, rubric, policy),
         ))
     if is_truncated(response.finish_reason):
