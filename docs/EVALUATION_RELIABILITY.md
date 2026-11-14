@@ -103,6 +103,10 @@ allowance in the maximum output ceiling. Mode, prompt/parser fingerprints,
 policies, provider/model configuration, output allowance, destination, and evidence
 bind the evaluator and approval. There is one provider attempt, no per-turn
 fan-out and no automatic retry. Scheduling preserves the same exact approval.
+OpenAI audit judges are asked for JSON mode, which makes a reply that is not
+cut off one syntactically valid JSON object; it does not check fields, so the
+reply is still decoded and validated against the contract. Anthropic requests
+are unchanged.
 
 Ordered pairs carry available timestamps and short positional references: `T1`
 is the first selected turn in order, `Q1` its request, `R1` its response, and
