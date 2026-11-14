@@ -6,6 +6,8 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0b7] - 2026-11-14
+
 ### Added
 
 - Monitoring can compare recorded Agent Run outcomes historically: failed or
