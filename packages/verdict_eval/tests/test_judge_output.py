@@ -144,7 +144,7 @@ def test_every_shape_and_wrapper_decodes_to_the_same_fields(shape, wrapper) -> N
     assert dimension_fields(decoded["safety"]).reason == "leaks {braces} and ```fences```"
 
 
-def test_random_wrappers_never_change_the_decoded_fields() -> None:
+def test_random_wrappers_preserve_fields_and_malformed_arrays_reject() -> None:
     rng = random.Random(20260929)
     atoms = ['"', "{", "}", "[", "]", "```", "\\", "é", "\n", "json", ":", ","]
     for _ in range(300):
@@ -161,6 +161,9 @@ def test_random_wrappers_never_change_the_decoded_fields() -> None:
         wrapper = rng.choice(["none", "fence", "bare_fence", "prose", "preface_json"])
 
         decoded = decode_judge_dimensions(_render(results, shape, wrapper), names)
+
+        with pytest.raises(JudgeOutputError):
+            decode_judge_dimensions("[" + _render(results, shape, "none") + ",]", names)
 
         assert set(decoded) == set(names), (shape, wrapper)
         for name in names:
@@ -247,7 +250,7 @@ def test_oversize_reply_is_unusable_not_malformed() -> None:
 
 
 def test_candidate_scan_is_bounded() -> None:
-    text = "[ " * 65 + '{"helpful": {"verdict": "PASS"}}'
+    text = "[] " * 65 + '{"helpful": {"verdict": "PASS"}}'
 
     with pytest.raises(JudgeOutputError, match="candidate"):
         decode_judge_dimensions(text, ["helpful"])
@@ -269,6 +272,46 @@ def test_brackets_in_prose_are_still_skipped() -> None:
     text = 'Scores [see below]:\n{"helpful": {"verdict": "PASS", "reason": "ok"}}'
 
     assert decode_judge_dimensions(text, ["helpful"]) == {"helpful": {"verdict": "PASS", "reason": "ok"}}
+
+
+@pytest.mark.parametrize("shape", ["flat", "bare_list"])
+@pytest.mark.parametrize(("prefix", "suffix"), [
+    ("[", ""),
+    ("[", ",]"),
+    ("[", ", oops]"),
+    ("[0,", ""),
+    ("[true,", ",]"),
+    ("[null,", ",]"),
+    ('["draft",', ",]"),
+    ("[[", "]"),
+    ("[oops,", "]"),
+    ("", "\n[truex]"),
+    ("[nullx]\n", ""),
+    ("[FALSEhood]\n", ""),
+])
+def test_malformed_arrays_cannot_select_inner_or_later_answers(shape, prefix, suffix):
+    answer = _render({"helpful": {"verdict": "PASS", "reason": "ok"}}, shape, "none")
+
+    with pytest.raises(JudgeOutputError, match="malformed judge JSON array"):
+        decode_judge_dimensions(prefix + answer + suffix, ["helpful"])
+
+
+@pytest.mark.parametrize("label", ["see below", "voir ci dessous", "参照", "Résumé", "see\nbelow"])
+@pytest.mark.parametrize("separator", ["", ":\n"])
+def test_complete_alphabetic_prose_labels_are_skipped_atomically(label, separator):
+    answer = '{"helpful": {"verdict": "PASS", "reason": "[literal {delimiters}]"}}'
+
+    assert decode_judge_dimensions(f"Scores [{label}]" + separator + answer, ["helpful"]) == {
+        "helpful": {"verdict": "PASS", "reason": "[literal {delimiters}]"},
+    }
+
+
+@pytest.mark.parametrize("label", ["see-below", "see 2", '"see below" x', "see [below]", "re\u0301sume\u0301"])
+def test_unsupported_bracketed_prose_does_not_skip_to_a_later_answer(label):
+    answer = '{"helpful": {"verdict": "PASS", "reason": "ok"}}'
+
+    with pytest.raises(JudgeOutputError, match="malformed judge JSON array"):
+        decode_judge_dimensions(f"[{label}]\n" + answer, ["helpful"])
 
 
 def test_dimension_fields_normalize_verdict_reason_and_findings() -> None:

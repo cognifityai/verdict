@@ -6,6 +6,14 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Malformed judge arrays can no longer supply an inner or later answer as a
+  successful trace, conversation or historical-audit assessment. A conservative
+  bracketed-prose grammar preserves labels such as `[see below]`; other
+  unsupported bracketed text may now be an error. Output contract v4 separates
+  new evaluator identities while preserving saved history.
+
 ## [0.1.0b7] - 2026-11-14
 
 ### Added

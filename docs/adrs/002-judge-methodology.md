@@ -21,12 +21,16 @@ PASS rate is `PASS / (PASS + FAIL)`. `UNCLEAR`, missing dimensions, and judge
 errors are separate coverage states and do not
 enter the denominator. No scored values means unavailable, not zero percent.
 
-Every judge path decodes replies through one shared decoder
+JSON judge paths decode replies through one shared decoder
 (`verdict_eval.judge_output`). It accepts the reply's JSON inside a Markdown
 fence or prose and the per-dimension results as an object keyed by name or as
 a list of named objects, and it rejects duplicate keys, duplicate dimension
 names, and non-finite numbers. Malformed replies, missing or extra dimensions,
 conflicting reasons, multiple answers, and invalid verdicts are execution errors.
+Malformed arrays cannot supply an inner or later answer. A bounded positive
+prose-label grammar preserves wrappers such as `[see below]` without resuming
+inside a broken JSON container; the exact grammar is documented in
+[`EVALUATION_RELIABILITY.md`](../EVALUATION_RELIABILITY.md).
 UNCLEAR means insufficient evidence or an inapplicable criterion. Missing capture
 alone is not an application failure; a complete answer with a demonstrated omission
 may FAIL. Explicit rubric/user writing requirements override generic style

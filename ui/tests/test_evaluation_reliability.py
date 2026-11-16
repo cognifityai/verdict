@@ -120,6 +120,13 @@ class AuditProvider(_IdentityOnlyProvider):
                                   finish_reason=self.finish_reason)
 
 
+class RawAuditProvider(AuditProvider):
+    def complete(self, request):
+        self.calls += 1
+        self.request = request
+        return CompletionResponse(text=self.payload, input_tokens=1, output_tokens=1)
+
+
 @pytest.fixture(params=["sqlite", "postgres"])
 def reliability_store(request, tmp_path):
     if request.param == "sqlite":
@@ -320,6 +327,80 @@ def test_redacted_run_identifier_reports_unknown_freshness_not_stale(reliability
             assert saved["evidenceSelection"] is None
             assert run_id not in json.dumps(saved)
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("prefix", "suffix", "expected_status"), [
+    ("", "", "completed"),
+    ("```json\n", "\n```", "completed"),
+    ("Scores [see below]:\n", "", "completed"),
+    ("[", "", "error"),
+    ("[", ",]", "error"),
+    ("[", ", oops]", "error"),
+    ("[0,", "", "error"),
+    ("[true,", ",]", "error"),
+    ('["draft",', ",]", "error"),
+    ("[[", "]", "error"),
+    ("[oops,", "]", "error"),
+    ("", "\n[nullx]", "error"),
+])
+def test_audit_reply_envelope_survives_storage_api_and_replay(
+        reliability_store, monkeypatch, prefix, suffix, expected_status):
+    import verdict.dashboard.scoped_evaluation as scoped
+
+    storage, url = reliability_store
+    storage.replace_agent_run_bundle(history_bundle(("A hexagon has six sides.",)))
+    config = audit_config()
+    preview = preview_scoped(storage, tenant="local", config=config, storage_url=url)
+    answer = json.dumps(audit_reply(preview["evidencePreview"], labels=("PASS",)))
+    provider = RawAuditProvider(prefix + answer + suffix)
+    monkeypatch.setattr(scoped, "_provider", lambda _: provider)
+
+    async def scenario():
+        app = create_app(storage=url, tenant_id="local")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            request = {**config, "planFingerprint": preview["planFingerprint"], "confirmExternalEgress": True}
+            completed = await client.post("/api/scoped/run", json=request, headers=headers)
+            assert completed.status_code == 200, completed.text
+            result = completed.json()
+            assert result["status"] == expected_status
+            assert result["error"] == ("JudgeOutputError" if expected_status == "error" else None)
+            assert [item["verdict"] for item in result["dimensions"]] == (
+                [] if expected_status == "error" else ["pass"])
+            saved_response = await client.get(f"/api/scoped/result/{result['resultId']}")
+            assert saved_response.status_code == 200
+            saved = saved_response.json()
+            assert saved["status"] == expected_status
+            assert saved["dimensions"] == result["dimensions"]
+            replay = (await client.post("/api/scoped/run", json=request, headers=headers)).json()
+            assert replay["resultId"] == result["resultId"]
+            assert replay["status"] == expected_status
+            assert provider.calls == 1
+            assert ControlStore(url).history("other", "scoped_evaluation", result["resultId"]) == []
+    asyncio.run(scenario())
+
+
+def test_decoder_revision_requires_new_approval_without_rewriting_saved_history(reliability_store, monkeypatch):
+    from verdict_eval import judge_output
+
+    storage, url = reliability_store
+    storage.replace_agent_run_bundle(history_bundle(("A hexagon has six sides.",)))
+    config = audit_config()
+    with monkeypatch.context() as legacy:
+        legacy.setattr(judge_output, "OUTPUT_CONTRACT_VERSION", "judge_output_v3")
+        before = preview_scoped(storage, tenant="local", config=config, storage_url=url)
+        provider = AuditProvider(audit_reply(before["evidencePreview"], labels=("PASS",)))
+        result = run_audit(storage, url, config, provider)
+    stored_before = copy.deepcopy(ControlStore(url).history("local", "scoped_evaluation", result["resultId"]))
+
+    after = preview_scoped(storage, tenant="local", config=config, storage_url=url)
+
+    assert after["evaluatorFingerprint"] != before["evaluatorFingerprint"]
+    assert after["planFingerprint"] != before["planFingerprint"]
+    assert after.get("savedResult") is None
+    assert provider.calls == 1
+    assert ControlStore(url).history("local", "scoped_evaluation", result["resultId"]) == stored_before
 
 
 def test_scheduled_audit_retains_mode_policy_and_output_allowance(reliability_store):

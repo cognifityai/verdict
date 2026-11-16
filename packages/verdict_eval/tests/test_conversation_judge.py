@@ -499,6 +499,9 @@ def test_stray_score_on_a_binary_dimension_is_dropped():
     '{"dimensions": {"helpful": {"verdict": "MAYBE", "reason": "x"}}}',
     '{"dimensions": {"helpful": {"verdict": "PASS", "reason": "x", "findings": [{"issue": "a", "dimension": "other"}]}}}',
     '{"dimensions": {"helpful": "PASS"}}',
+    '[{"dimensions": {"helpful": {"verdict": "PASS", "reason": "ok"}}}',
+    '[{"dimensions": {"helpful": {"verdict": "PASS", "reason": "ok"}}},]',
+    '[null,{"dimensions": {"helpful": {"verdict": "PASS", "reason": "ok"}}}, oops]',
     'I decline to grade this transcript.',
 ])
 def test_replies_that_do_not_answer_the_rubric_are_errors(reply):
@@ -523,7 +526,7 @@ def test_evaluator_identity_names_the_prompt_and_output_contract(monkeypatch):
         f"{conversation_judge.PROMPT_VERSION}/{judge_output.OUTPUT_CONTRACT_VERSION}"
         f"/{conversation_judge.PROMPT_FINGERPRINT}"
     )
-    assert re.fullmatch(r"conversation_rubric_v2/judge_output_v3/[0-9a-f]{12}",
+    assert re.fullmatch(r"conversation_rubric_v2/judge_output_v4/[0-9a-f]{12}",
                         before["evaluator"]["prompt_version"])
 
     monkeypatch.setattr(judge_output, "OUTPUT_CONTRACT_VERSION", "judge_output_test")

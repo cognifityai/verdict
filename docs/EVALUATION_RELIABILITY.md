@@ -129,9 +129,21 @@ be changed into a retrospective PASS. Missing entries or contradictory structure
 results are errors. Partial evidence, ambiguous chronology, or ambiguous recovery
 cannot produce a clean aggregate PASS. The reply may be wrapped in a Markdown
 fence or a sentence, but must contain exactly one JSON object with a `turns` key;
-a second answer or malformed JSON is an error. A JSON object that does not
-decode makes the whole reply an error, for both the audit and the trace judge,
-rather than letting a valid object inside or after it stand as the answer.
+a second answer or an attempted JSON container that does not decode makes the
+whole reply an error. The shared decoder never extracts an answer from inside
+or after a malformed object or array, including truncated and trailing-comma
+arrays.
+
+Surrounding prose may include complete bracketed labels such as `[see below]`.
+After trimming, a supported label contains only Unicode alphabetic characters
+and whitespace, and does not start with `true`, `false`, or `null`, ignoring
+case. This is an explicit prose grammar: `[note]` is prose under that rule,
+while `[truex]`, `[see-below]`, numbered labels, nested brackets and unclosed
+labels are rejected if they cannot decode as JSON. Combining marks are not
+alphabetic under this rule, so decomposed accents can also be rejected. Valid
+JSON metadata such as `[1, 2]` is decoded normally. A supported prose label is
+skipped as a whole; its interior is never scanned for an answer. This
+conservative boundary can reject previously tolerated prose wrappers.
 
 When ordinary evaluation of a run or session is unavailable only because its
 event capture is partial or its event order is uncertain, and its turn text is
@@ -152,6 +164,9 @@ example, an ID containing an IP address), because the redacted ID no longer
 selects the evidence.
 A matching preview reopens the saved result without another call. Changed
 evidence requires a new preview and preserves prior assessments.
+The stricter decoder uses output contract `judge_output_v4`; new approvals have
+different evaluator identities from v3. Previously saved results retain their
+original identities and verdicts and are not automatically regraded or repaired.
 
 Citation validation checks selected-reference membership, phase availability,
 and exact quote presence for audits. It does **not** verify entailment or factual

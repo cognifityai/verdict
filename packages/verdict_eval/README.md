@@ -32,7 +32,7 @@ Dimensions marked `requires_context=True` can be skipped when a caller enables
 `skip_context_dependent_when_missing`. If every dimension requires unavailable
 context, evaluation fails before a provider call.
 
-Every judge reply is decoded by `verdict_eval.judge_output`, which both the
+JSON judge replies are decoded by `verdict_eval.judge_output`, which both the
 Trace/Turn judge and conversation grading share. It finds the JSON inside a
 Markdown fence or surrounding prose and accepts the per-dimension results as
 an object keyed by dimension name, inside an outer `dimensions` object, or as
@@ -48,6 +48,15 @@ exact message at the stated 0-based position. The decoder's
 contract version is part of the evaluator identity (`evaluator_config`
 `output_contract`, and the conversation prompt version's suffix), so a decoder
 change never pools with earlier judgments.
+
+Malformed JSON objects and arrays reject the whole reply, including an array
+with a valid answer inside it. The decoder may skip a complete bracketed prose
+label only when its trimmed content consists of Unicode letters/whitespace and
+does not start with `true`, `false`, or `null`, ignoring case. Thus `[see below]`
+is supported prose, but malformed `[truex]`, `[see-below]`, nested or unclosed
+labels are errors. Combining marks do not count as letters. Valid JSON metadata
+is decoded normally. Output contract `judge_output_v4` distinguishes these rules
+from earlier decoders; saved results keep their original identities and verdicts.
 
 The judge respects explicit length, style, and formatting requirements.
 Insufficient evidence is `UNCLEAR`; demonstrated violations may `FAIL`, including

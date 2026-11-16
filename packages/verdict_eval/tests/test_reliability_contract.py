@@ -17,6 +17,9 @@ RUBRIC = Rubric("synthetic", "1", (RubricDimension("delivery", "Include two exam
     '{"delivery":{"verdict":"PASS"},"extra":{"verdict":"FAIL"}}',
     '{"delivery":{"verdict":"PASS","reason":"yes","reasoning":"no"}}',
     '{"delivery":{"verdict":"PASS"}} {"delivery":{"verdict":"FAIL"}}',
+    '[{"delivery":{"verdict":"PASS"}}',
+    '[{"delivery":{"verdict":"PASS"}},]',
+    '[0,{"delivery":{"verdict":"PASS"}}, oops]',
 ])
 def test_technical_reply_failure_is_error_not_semantic_uncertainty(payload):
     with pytest.raises(JudgeOutputError):
@@ -109,6 +112,22 @@ def test_malformed_audit_object_is_invalid_json_not_its_inner_objects():
     with pytest.raises(JudgeOutputError, match="invalid audit JSON"):
         decode_judge_object(malformed + "\n" + reply)
     assert decode_judge_object(reply)["turns"]
+
+
+@pytest.mark.parametrize(("prefix", "suffix"), [
+    ("[", ""), ("[", ",]"), ("[", ", oops]"),
+    ("[false,", ""), ('["draft",', ",]"), ("[[", "]"),
+    ("[oops,", "]"), ("", "\n[nullx]"),
+])
+def test_malformed_audit_array_is_an_error_not_its_inner_object(prefix, suffix):
+    from verdict_eval.historical_audit import parse
+
+    response = "A hexagon has five sides."
+    policy = {"geometry": {"aggregation": "holistic", "evidenceAuthority": "public_knowledge",
+                           "requiredEvidence": ["request", "response"]}}
+    reply = _literal_template_reply("geometry", response)
+    with pytest.raises(JudgeOutputError, match="invalid audit JSON"):
+        parse(prefix + reply + suffix, _single_turn_evidence(response), policy)
 
 
 def test_only_the_historical_audit_requests_json_output():
