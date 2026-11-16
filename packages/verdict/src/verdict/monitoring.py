@@ -40,7 +40,7 @@ EVIDENCE_FINALIZATION_VERSION = 1
 # tool call is not measured as blank, and a call with a recorded provider error
 # measures no response metric. A manifest frozen under an older definition must
 # be re-bootstrapped instead of compared with counts computed under this one.
-METRIC_CONTRACT_VERSION = 1
+METRIC_CONTRACT_VERSION = 2
 
 
 class MonitorRebootstrapRequired(ValueError):
@@ -464,7 +464,7 @@ class CohortManifest:
             raise ValueError("unsupported evidence finalization version")
         if self.prospective_start_at is not None:
             _aware(self.prospective_start_at, "prospective_start_at")
-        if self.metric_contract_version not in {0, METRIC_CONTRACT_VERSION}:
+        if self.metric_contract_version not in {0, 1, METRIC_CONTRACT_VERSION}:
             raise ValueError("unsupported monitor metric contract version")
 
 

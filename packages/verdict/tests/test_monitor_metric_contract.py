@@ -36,9 +36,17 @@ CALLS = RESPONSE_TOOL_CALLS_TAG
         ("", {}, "tool_calls", False),
         ("", {}, "tool_use", False),
         ("", {}, "tool_call", False),
-        # A recorded zero count settles the question.
+        # A recorded zero count plus a completed response settles the question.
         ("", {CALLS: "0"}, "completed", True),
-        ("  \n", {CALLS: "0"}, None, True),
+        ("  \n", {CALLS: "0"}, None, None),
+        ("", {CALLS: "0"}, "queued", None),
+        ("", {CALLS: "0"}, "in_progress", None),
+        ("", {CALLS: "0"}, "max_output_tokens", None),
+        ("", {CALLS: "0"}, "content_filter", None),
+        ("", {CALLS: "0", "verdict.stream_completion": "partial"}, "end_turn", None),
+        ("", {CALLS: "0", "verdict.stream_completion": "complete"}, "end_turn", True),
+        ("Observed text", {CALLS: "0", "verdict.stream_completion": "partial"}, None, False),
+        ("", {CALLS: "1", "verdict.stream_completion": "partial"}, None, False),
         # A provider stop reason does too.
         ("", {}, "stop", True),
         ("", {}, "end_turn", True),
@@ -144,19 +152,24 @@ def test_new_manifests_carry_the_current_contract_through_json() -> None:
     assert monitor_requires_rebootstrap(policy, restored) is False
 
 
-def test_manifests_stored_before_versioning_require_rebootstrap() -> None:
+@pytest.mark.parametrize("version", [0, 1])
+def test_earlier_metric_contracts_remain_readable_and_require_rebootstrap(version) -> None:
     policy, manifest, comparison = _snapshot()
     payload = json.loads(monitor_snapshot_to_json(manifest, comparison))
-    del payload["manifest"]["metric_contract_version"]
+    if version == 0:
+        del payload["manifest"]["metric_contract_version"]
+    else:
+        payload["manifest"]["metric_contract_version"] = version
     legacy, _ = monitor_snapshot_from_json(json.dumps(payload))
 
-    assert legacy.metric_contract_version == 0
+    assert legacy.metric_contract_version == version
     assert monitor_requires_rebootstrap(policy, legacy) is True
 
 
-def test_worker_refuses_to_advance_a_legacy_reference() -> None:
+@pytest.mark.parametrize("version", [0, 1])
+def test_worker_refuses_to_advance_a_legacy_reference(version) -> None:
     policy, manifest, comparison = _snapshot()
-    legacy = replace(manifest, metric_contract_version=0)
+    legacy = replace(manifest, metric_contract_version=version)
     storage = InMemoryStorage()
     storage.save_monitor_candidate(policy, legacy, comparison)
     storage.activate_monitor_policy(
@@ -173,10 +186,11 @@ def test_unknown_contract_version_is_rejected() -> None:
         replace(manifest, metric_contract_version=METRIC_CONTRACT_VERSION + 1)
 
 
-def test_direct_planner_refuses_to_extend_a_legacy_reference() -> None:
-    """Adversarial: a successor must not pair a v0 reference with v1 measurements."""
+@pytest.mark.parametrize("version", [0, 1])
+def test_direct_planner_refuses_to_extend_a_legacy_reference(version) -> None:
+    """A successor must not pair an earlier reference with current measurements."""
     policy, manifest, _comparison = _snapshot()
-    legacy = replace(manifest, metric_contract_version=0)
+    legacy = replace(manifest, metric_contract_version=version)
     traces = [_trace(index, response_redacted="ok", tags={CALLS: "0"}) for index in range(80, 120)]
     with pytest.raises(ValueError, match="re-bootstrap"):
         plan_prospective_manifest(legacy, trace_monitor_units(traces), policy)

@@ -60,7 +60,10 @@ finish reason, and errors where the provider supplies them, and measures call
 latency around the SDK call. A completed call records how many tool calls the
 response asked the application to run, including zero, in the
 `verdict.response_tool_calls` tag; captured response text holds only answer
-text. Tools that run inside the provider, such as hosted web or file search,
+text. An unfinished capture may also record the count observed so far. A zero
+count alone does not establish a completed blank response: Monitor withholds
+empty partial, pending, or cut-off replies and replies with no finish reason.
+Tools that run inside the provider, such as hosted web or file search,
 are not counted. The
 application supplies its own run, tool, test, feedback, and outcome records;
 Verdict does not infer task success from a model answer. SDK content capture is

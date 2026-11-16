@@ -559,13 +559,14 @@ For each binary metric in an eligible Monitor group:
 The `response_empty` metric means the call returned **no answer text and no
 tool call** for the application to run. A reply that only asks for a tool call
 is not blank. A reply counts as blank only when the capture can rule out an
-omitted tool call: SDK capture records the call's tool-call count, including
-zero, or the provider reported a stop reason. An empty reply without either,
-such as an OpenAI Responses call captured before the tool-call count existed,
-is left out of the metric rather than guessed. So is an empty reply that stopped
-at its output limit (for example OpenAI `incomplete` or `length`, or Anthropic
-`max_tokens`): it was cut off, so it does not show whether the model would have
-answered. Calls with no captured response
+omitted tool call and establish completion. A zero tool-call count alone only
+means no call has been observed yet. Empty partial streams, responses with no
+finish reason, and queued or in-progress background responses are left out.
+A completed OpenAI Responses status still needs a recorded zero count to rule
+out an uncaptured tool call. Empty replies cut off by output limits or content
+filtering (including OpenAI `max_output_tokens`, `incomplete`, `length`, and
+`content_filter`, or Anthropic `max_tokens`) are also left out. Observed answer
+text or a client tool call still establishes a nonblank response. Calls with no captured response
 field, and calls with a recorded provider error, are excluded from
 `response_empty` and `refusal_signature`; a provider error is measured only by
 `provider_error`. A significant change in the blank rate is a capture-level
@@ -574,7 +575,9 @@ pattern change, not proof of a quality regression or task failure.
 Each frozen cohort records the version of these metric definitions. When a
 definition changes, a monitor whose reference was measured under the earlier
 definition requires a new reviewed reference instead of comparing counts
-computed two different ways.
+computed two different ways. Current metric contract 2 keeps version 0 and 1
+history readable, but those references must be rebuilt before new monitoring
+cycles can extend them.
 
 ### Run outcome comparisons
 

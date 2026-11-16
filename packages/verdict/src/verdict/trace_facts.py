@@ -28,10 +28,12 @@ _TOOL_CALL_FINISH_REASONS = frozenset({"tool_calls", "tool_use", "function_call"
 # OpenAI Responses reports its lifecycle status where other providers report a
 # stop reason, so an empty "completed" response may have been a tool call.
 _STATUS_ONLY_FINISH_REASONS = frozenset({"completed", "in_progress", "queued"})
-# A reply stopped at its output limit (OpenAI Responses ``incomplete``, OpenAI
-# ``length``, Anthropic ``max_tokens``, Gemini ``MAX_TOKENS``) was cut off, so
-# an empty one does not show whether the model would have answered.
-_CUT_OFF_FINISH_REASONS = frozenset({"incomplete", "length", "max_tokens"})
+# Output limits and content filters can stop an answer before it is produced.
+# Responses capture preserves incomplete_details.reason (max_output_tokens or
+# content_filter) rather than only the generic incomplete lifecycle status.
+_CUT_OFF_FINISH_REASONS = frozenset({
+    "incomplete", "length", "max_tokens", "max_output_tokens", "content_filter",
+})
 
 
 def _recorded_tool_call_count(tags: object) -> int | None:
@@ -52,11 +54,11 @@ def response_has_tool_calls(*, tags: object, finish_reason: object) -> bool:
 def response_is_blank(*, response: object, tags: object, finish_reason: object) -> bool | None:
     """Classify a completed reply as blank, answered, or not decidable (None).
 
-    A reply is blank only when it has no answer text, no client tool call, and
-    the capture establishes that no call was omitted: a recorded tool-call count
-    of zero, or a provider stop reason. A status-only or missing finish reason
-    without a recorded count cannot distinguish a tool call from a blank reply,
-    and an empty reply cut off at its output limit is not decidable either.
+    A reply is blank only when it has no answer text or client tool call and
+    capture establishes a final response. A zero count alone means no call was
+    observed yet. Partial streams, pending responses, missing finish reasons,
+    and cut-off replies remain unknown. A completed status also needs a zero
+    count to distinguish an answer from an uncaptured tool call.
     """
     if not isinstance(response, str):
         return None
@@ -64,15 +66,15 @@ def response_is_blank(*, response: object, tags: object, finish_reason: object) 
         tags=tags, finish_reason=finish_reason,
     ):
         return False
-    if isinstance(finish_reason, str) and (
-        finish_reason.rsplit(".", 1)[-1].strip().lower() in _CUT_OFF_FINISH_REASONS
-    ):
+    if isinstance(tags, dict) and tags.get("verdict.stream_completion") not in (None, "complete"):
+        return None
+    reason = (finish_reason.rsplit(".", 1)[-1].strip().lower()
+              if isinstance(finish_reason, str) else "")
+    if not reason or reason in _CUT_OFF_FINISH_REASONS or reason in {"queued", "in_progress"}:
         return None
     if _recorded_tool_call_count(tags) == 0:
         return True
-    if isinstance(finish_reason, str) and finish_reason and (
-        finish_reason not in _STATUS_ONLY_FINISH_REASONS
-    ):
+    if reason not in _STATUS_ONLY_FINISH_REASONS:
         return True
     return None
 
