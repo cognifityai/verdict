@@ -133,9 +133,13 @@ extra audit turns"); it never contains reply or evidence text. Other errors keep
 only their type in `error`. Partial evidence, ambiguous chronology, or ambiguous recovery
 cannot produce a clean aggregate PASS. The reply may be wrapped in a Markdown
 fence or a sentence, but must contain exactly one JSON object with a `turns` key;
-a second answer or malformed JSON is an error. A JSON object that does not
-decode makes the whole reply an error, for both the audit and the trace judge,
-rather than letting a valid object inside or after it stand as the answer.
+a second answer or malformed JSON is an error. A JSON object or array that does
+not decode makes the whole reply an error, for both the audit and the trace
+judge, rather than letting a valid object inside or after it stand as the answer.
+Closed textual notes such as `[see below]` are accepted as surrounding prose;
+they must not contain nested object or array structure or start with a JSON
+value. The decoder identity is `judge_output_v4`; saved earlier judgments keep
+their original identity and result.
 
 When ordinary evaluation of a run or session is unavailable only because its
 event capture is partial or its event order is uncertain, and its turn text is
