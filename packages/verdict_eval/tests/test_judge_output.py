@@ -247,7 +247,7 @@ def test_oversize_reply_is_unusable_not_malformed() -> None:
 
 
 def test_candidate_scan_is_bounded() -> None:
-    text = "[ " * 65 + '{"helpful": {"verdict": "PASS"}}'
+    text = '{"metadata": 0} ' * 65 + '{"helpful": {"verdict": "PASS"}}'
 
     with pytest.raises(JudgeOutputError, match="candidate"):
         decode_judge_dimensions(text, ["helpful"])
@@ -269,6 +269,33 @@ def test_brackets_in_prose_are_still_skipped() -> None:
     text = 'Scores [see below]:\n{"helpful": {"verdict": "PASS", "reason": "ok"}}'
 
     assert decode_judge_dimensions(text, ["helpful"]) == {"helpful": {"verdict": "PASS", "reason": "ok"}}
+
+
+@pytest.mark.parametrize("prefix,suffix", [
+    ("[", ""), ("[", ",]"), ("[[", ""), ("[0,", ",]"),
+    ('["draft",', ",]"), ("[true,", ",]"), ("[null,", ",]"),
+    ("[note ", "]"), ("[see below\n", ""),
+])
+def test_malformed_arrays_never_expose_an_inner_judge_answer(prefix, suffix) -> None:
+    from verdict_eval.judge_output import decode_judge_object
+
+    for answer, decode in (
+        ('{"helpful":{"verdict":"PASS"}}',
+         lambda text: decode_judge_dimensions(text, ["helpful"])),
+        ('{"turns":[]}', decode_judge_object),
+    ):
+        with pytest.raises(JudgeOutputError):
+            decode(prefix + answer + suffix)
+
+
+@pytest.mark.parametrize("note", ["see below", "first", "falsehood", "注意"])
+def test_closed_text_notes_preserve_wrapped_answers(note) -> None:
+    from verdict_eval.judge_output import decode_judge_object
+
+    text = f"Scores [{note}]:\n```json\n"
+    assert decode_judge_dimensions(text + '{"helpful":{"verdict":"PASS"}}\n```',
+                                   ["helpful"])["helpful"]["verdict"] == "PASS"
+    assert decode_judge_object(text + '{"turns":[]}\n```') == {"turns": []}
 
 
 def test_dimension_fields_normalize_verdict_reason_and_findings() -> None:

@@ -16,10 +16,11 @@ same provider reply into a different judgment, so it is a different evaluator.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
-OUTPUT_CONTRACT_VERSION = "judge_output_v3"
+OUTPUT_CONTRACT_VERSION = "judge_output_v4"
 MAX_OUTPUT_BYTES = 64_000
 _MAX_CANDIDATE_STARTS = 64
 _TRUNCATED_FINISH_REASONS = frozenset({"LENGTH", "MAX_TOKENS"})
@@ -87,10 +88,10 @@ def _candidates(text: str) -> Iterator[object]:
     is bounded so malformed output cannot force unbounded decode attempts. A
     duplicate key or non-finite number anywhere in a decodable value rejects
     the whole reply: continuing the scan could otherwise select an inner
-    object of a value that contradicted itself. For the same reason an object
-    that does not decode rejects the reply: the scan cannot tell where it
-    ends, so it would select whichever inner or later object happens to be
-    valid. Brackets are still skipped, because prose uses them.
+    object of a value that contradicted itself. A malformed object or array
+    also rejects the reply rather than exposing an inner answer. Closed
+    textual notes such as ``[see below]`` are consumed whole as prose; they
+    cannot contain nested object/array structure or start with a JSON value.
     """
     starts = 0
     index = 0
@@ -105,10 +106,15 @@ def _candidates(text: str) -> Iterator[object]:
         try:
             candidate, end = _DECODER.raw_decode(text, index)
         except json.JSONDecodeError as exc:
-            if character == "{":
-                raise JudgeOutputError("malformed judge JSON object") from exc
-            index += 1
-            continue
+            end = text.find("]", index + 1)
+            note = text[index + 1:end].strip() if end != -1 else ""
+            if (character == "[" and note and note[0].isalpha()
+                    and not any(mark in note for mark in "{}[")
+                    and not re.match(r"(?:true|false|null)\b", note)):
+                index = end + 1
+                continue
+            kind = "object" if character == "{" else "array"
+            raise JudgeOutputError(f"malformed judge JSON {kind}") from exc
         yield candidate
         index = end
 
@@ -216,10 +222,9 @@ def decode_judge_object(text: object) -> dict:
 
     Uses the same bounded scan as the trace judge, so a Markdown fence or a
     sentence around the object is tolerated. Only an object with the audit's
-    top-level ``turns`` key is an answer; when the reply's own object is
-    malformed the scan can still decode its inner objects, which are not
-    answers. Exactly one answer is required: a draft followed by a correction
-    is two answers, not one.
+    top-level ``turns`` key is an answer. A malformed envelope is an error;
+    its inner objects cannot replace it. Exactly one answer is required: a
+    draft followed by a correction is two answers, not one.
     """
     if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_OUTPUT_BYTES:
         raise JudgeOutputError("invalid audit output size or type")

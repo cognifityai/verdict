@@ -39,7 +39,9 @@ an object keyed by dimension name, inside an outer `dimensions` object, or as
 a list of objects that carry `name`. It rejects duplicate keys, duplicate
 dimension names, non-finite numbers and replies over 64 KB. Missing or extra
 dimensions, contradictory reasons, multiple answers, invalid verdicts, and
-malformed replies raise `JudgeOutputError`; cut-off and oversized replies raise
+malformed replies raise `JudgeOutputError`. Broken object or array envelopes
+cannot expose an inner answer; closed textual notes such as `[see below]`
+remain accepted as prose. Cut-off and oversized replies raise
 `JudgeOutputUnusable`. Callers record technical errors separately from semantic
 `UNCLEAR`. Scoped calls are never retried automatically. Conversation
 grading stores a finding's `issue` label in identifier form (words joined with

@@ -340,6 +340,45 @@ def test_real_citation_does_not_claim_entailment_validation(reliability_store):
     assert "entailment is unverified" in result["citationValidation"]
 
 
+@pytest.mark.parametrize("prefix,suffix", [("[", ""), ("[", ",]"), ("[[", "")])
+def test_malformed_array_audit_saves_error_and_replays_without_a_call(
+        reliability_store, monkeypatch, prefix, suffix):
+    import verdict.dashboard.scoped_evaluation as scoped
+
+    class WrappedProvider(AuditProvider):
+        def complete(self, request):
+            response = super().complete(request)
+            return replace(response, text=prefix + response.text + suffix)
+
+    storage, url = reliability_store
+    storage.replace_agent_run_bundle(history_bundle(("A hexagon has six sides.",)))
+    config = audit_config()
+    preview = preview_scoped(storage, tenant="local", config=config, storage_url=url)
+    provider = WrappedProvider(audit_reply(preview["evidencePreview"], ("PASS",)))
+    monkeypatch.setattr(scoped, "_provider", lambda _: provider)
+
+    async def scenario():
+        app = create_app(storage=url, tenant_id="local")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            fresh = (await client.post("/api/scoped/preview", json=config, headers=headers)).json()
+            request = {**config, "planFingerprint": fresh["planFingerprint"],
+                       "confirmExternalEgress": True}
+            executed = await client.post("/api/scoped/run", json=request, headers=headers)
+            assert executed.status_code == 200, executed.text
+            result = executed.json()
+            assert result["status"] == "error"
+            assert result["error"] and result["dimensions"] == []
+            saved = (await client.get(f"/api/scoped/result/{result['resultId']}")).json()
+            assert saved["status"] == "error" and saved["dimensions"] == []
+            replay = (await client.post("/api/scoped/run", json=request, headers=headers)).json()
+            assert replay == result
+            assert provider.calls == 1
+    asyncio.run(scenario())
+
+
 def test_uncertain_chronology_cannot_be_clean_pass(reliability_store):
     storage, url = reliability_store
     bundle = history_bundle(("A hexagon has six sides.", "A hexagon has six sides."))
