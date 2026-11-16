@@ -16,6 +16,16 @@ the product is refined.
   evidence only in whitespace. The audit evaluator version is now
   `historical_audit_v3`, so earlier saved audits are not reused for new runs.
 
+### Fixed
+
+- Judge decoding rejects malformed array envelopes instead of selecting an
+  inner answer. Closed textual bracket notes remain supported. Decoder
+  identity `judge_output_v4` keeps saved earlier judgments distinct.
+- Monitor leaves empty unfinished streams, pending responses, and actual
+  OpenAI `max_output_tokens` replies unmeasured even when capture observed zero
+  tool calls. Metric contract 2 preserves old history but requires references
+  from contracts 0 and 1 to be rebuilt before new cycles.
+
 ## [0.1.0b7] - 2026-11-14
 
 ### Added
