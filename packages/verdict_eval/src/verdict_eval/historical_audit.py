@@ -11,7 +11,7 @@ from verdict_eval.judge import SYSTEM_PROMPT
 from verdict_eval.judge_output import JudgeOutputError, decode_judge_object, is_truncated
 from verdict_eval.providers import CompletionRequest
 
-VERSION = "historical_audit_v2"  # v2: requests JSON output
+VERSION = "historical_audit_v3"  # v2: requests JSON output; v3: names required output, whitespace-insensitive quotes
 _AGGREGATIONS = {"historical_all_turns", "final_response", "holistic"}
 _AUTHORITIES = {"recorded_sources", "public_knowledge"}
 _FIELDS = {"request", "response", "sources"}
@@ -31,6 +31,10 @@ requirements. Captured summary/count/reference is not the actual answer or sourc
 
 References are the short labels supplied in the evidence: T1 is a turn, Q1 its
 request, R1 its response, E1 an event. Copy them exactly.
+
+requiredOutput lists the exact turn references, dimensions and holistic dimensions
+your reply must contain. Return an entry for every listed turn, in that order,
+and put holistic assessments only in the top-level holistic object.
 
 Reply with exactly one JSON object and nothing else. Shape, shown for turn T1:
 {"turns":[{"reference":"T1","dimensions":{"<dimension>":{
@@ -58,7 +62,8 @@ FAIL. Each finding has its own recovery object. Recovered requires a strictly la
 turnReference and a quote from that later response; a correction introducing a new
 error is also assessed as a separate finding on the later turn. Unresolved or
 ambiguous recovery never becomes recovered by implication. Use short reasons and
-quotes; do not truncate entries to fit. Citations must support the reasoning, not
+quotes; do not truncate entries to fit. A quote is one contiguous passage of
+the cited text; never join passages with an ellipsis. Citations must support the reasoning, not
 merely be real references. Aggregation is performed by the application:
 historical_all_turns preserves any retrospective failure even if recovered;
 final_response uses the final selected response; holistic uses its separately
@@ -108,6 +113,11 @@ def messages(evidence: dict, rubric, policy: dict) -> list[dict]:
     suitability = {key: value for key, value in evidence["suitability"].items() if key != "turns"}
     payload = {
         "rubric": {d.name: {"description": d.description, **policy[d.name]} for d in rubric.dimensions},
+        "requiredOutput": {
+            "turns": [pair["reference"] for pair in evidence["turnPairs"]],
+            "dimensions": list(policy),
+            "holistic": [name for name, p in policy.items() if p["aggregation"] == "holistic"],
+        },
         "evidence": {
             "turnPairs": [{key: pair[key] for key in _JUDGE_PAIR_FIELDS} for pair in evidence["turnPairs"]],
             "documents": evidence["documents"], "chronologyCertain": evidence["chronologyCertain"],
@@ -130,6 +140,12 @@ def _text(value):
     return value
 
 
+def _collapse(text: str) -> str:
+    # Judges re-flow whitespace (a paragraph break quoted as one space); the
+    # words themselves must still match exactly.
+    return " ".join(text.split())
+
+
 def _citations(value, allowed, documents):
     if not isinstance(value, list) or len(value) > 8:
         raise JudgeOutputError("invalid audit citations")
@@ -139,7 +155,7 @@ def _citations(value, allowed, documents):
         reference, quote = citation["reference"], _text(citation["quote"])
         if not isinstance(reference, str) or reference not in allowed:
             raise JudgeOutputError("citation outside assessment evidence phase")
-        if quote not in documents[reference]["text"]:
+        if _collapse(quote) not in _collapse(documents[reference]["text"]):
             raise JudgeOutputError("citation quote not present in referenced evidence")
         refs.append(reference)
     return refs
@@ -240,7 +256,8 @@ def parse(text: str, evidence: dict, policy: dict) -> dict:
     return {"dimensions": dimensions, "turnAssessments": turn_assessments,
             "historicalFindings": historical_findings,
             "holisticAssessments": [{"dimension": name, **item} for name, item in output["holistic"].items()],
-            "citationValidation": "Exact quote and membership checks only; entailment is unverified."}
+            "citationValidation": ("Exact quote (ignoring whitespace) and membership checks only; "
+                                   "entailment is unverified.")}
 
 
 def execute(provider, *, model: str, max_tokens: int, evidence: dict, rubric, policy: dict) -> dict:

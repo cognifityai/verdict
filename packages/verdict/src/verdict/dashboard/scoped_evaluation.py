@@ -748,6 +748,7 @@ def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
         raise ValueError("judge provider behavior changed after preview")
     evidence = preview["evidencePreview"]
     audit_result = {}
+    error_detail = None
     try:
         if preview["evaluationMode"] == "historical_audit":
             from verdict_eval import historical_audit
@@ -780,6 +781,12 @@ def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
         status, error = "completed", None
     except Exception as exc:
         status, error, dimensions = "error", type(exc).__name__, []
+        # Judge-output messages are fixed texts naming the broken rule, never
+        # reply or evidence content; other exceptions keep only their type.
+        from verdict_eval.judge_output import JudgeOutputError
+
+        if isinstance(exc, JudgeOutputError):
+            error_detail = str(exc)
     # An append or corrected import during the provider call invalidates the
     # judgment even when the user approved the pre-call projection.
     try:
@@ -787,10 +794,10 @@ def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
     except (KeyError, TypeError, ValueError, UnicodeError):
         still_current = False
     if not still_current:
-        status, error, dimensions = "error", "evidence_changed_during_evaluation", []
+        status, error, error_detail, dimensions = "error", "evidence_changed_during_evaluation", None, []
     result = {
         **_result_metadata(preview, rubric),
-        "status": status, "error": error, "dimensions": dimensions,
+        "status": status, "error": error, "errorDetail": error_detail, "dimensions": dimensions,
         "evidenceCurrent": still_current,
         "evaluatedAt": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
         **({key: audit_result[key] for key in (

@@ -106,7 +106,8 @@ fan-out and no automatic retry. Scheduling preserves the same exact approval.
 OpenAI audit judges are asked for JSON mode, which makes a reply that is not
 cut off one syntactically valid JSON object; it does not check fields, so the
 reply is still decoded and validated against the contract. Anthropic requests
-are unchanged.
+are unchanged. The request lists the exact turn references, dimensions, and
+holistic dimensions the reply must contain (`requiredOutput`).
 
 Ordered pairs carry available timestamps and short positional references: `T1`
 is the first selected turn in order, `Q1` its request, `R1` its response, and
@@ -126,7 +127,10 @@ finding ID is a contract error.
 Each finding has its own recovered, unresolved, or unclear state; recovered
 requires a cited, unambiguously later response. A supported original FAIL cannot
 be changed into a retrospective PASS. Missing entries or contradictory structured
-results are errors. Partial evidence, ambiguous chronology, or ambiguous recovery
+results are errors. A saved error from a reply that breaks the contract keeps
+`errorDetail`, a fixed description of the broken rule (for example "missing or
+extra audit turns"); it never contains reply or evidence text. Other errors keep
+only their type in `error`. Partial evidence, ambiguous chronology, or ambiguous recovery
 cannot produce a clean aggregate PASS. The reply may be wrapped in a Markdown
 fence or a sentence, but must contain exactly one JSON object with a `turns` key;
 a second answer or malformed JSON is an error. A JSON object that does not
@@ -154,7 +158,9 @@ A matching preview reopens the saved result without another call. Changed
 evidence requires a new preview and preserves prior assessments.
 
 Citation validation checks selected-reference membership, phase availability,
-and exact quote presence for audits. It does **not** verify entailment or factual
+and exact quote presence for audits. Quotes are compared with runs of whitespace
+treated as one space, so a paragraph break quoted as a space still matches;
+every word and punctuation mark must match, and an elided quote is rejected. It does **not** verify entailment or factual
 truth. A real quote can fail to support a conclusion. Synthetic mocked-provider
 tests exercise the workflow and validation logic; they do not semantically
 validate the judge. Calibrate each evaluator against independently labeled,

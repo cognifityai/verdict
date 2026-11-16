@@ -168,7 +168,7 @@ export function ScopedEvaluate({ root, scope, runId = null, turnId = null, event
             <details><summary>Finding and recovery evidence</summary><pre className="whitespace-pre-wrap break-words">{JSON.stringify(finding, null, 2)}</pre></details>
           </div>)}
         </div>}
-        {result.error && <p style={{ color: C.red }}>Judge result unavailable: {result.error}</p>}
+        {result.error && <p style={{ color: C.red }}>Judge result unavailable: {result.errorDetail ? `the judge's reply broke the result format (${result.errorDetail})` : result.error}</p>}
       </div>}
       {error && <p role="alert" style={{ color: C.red }}>{error}</p>}
     </div>}
