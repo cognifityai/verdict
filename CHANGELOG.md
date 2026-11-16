@@ -6,6 +6,16 @@ the product is refined.
 
 ## [Unreleased]
 
+### Changed
+
+- A saved scoped evaluation that fails because the judge reply breaks the
+  result contract now stores and shows `errorDetail`, the broken rule (for
+  example "missing or extra audit turns"), instead of only `JudgeOutputError`.
+- Historical audit requests list the exact turns, dimensions, and holistic
+  dimensions the reply must contain, and audit quotes may differ from the
+  evidence only in whitespace. The audit evaluator version is now
+  `historical_audit_v3`, so earlier saved audits are not reused for new runs.
+
 ## [0.1.0b7] - 2026-11-14
 
 ### Added

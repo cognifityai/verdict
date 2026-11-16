@@ -206,9 +206,23 @@ def test_final_completion_is_explicitly_distinct_from_historical_accuracy(reliab
     assert historical.get("savedResult") is None
 
 
-@pytest.mark.parametrize("mutation", ["missing_turn", "duplicate_turn", "extra_dimension", "erased_failure",
-                                    "wrong_quote", "foreign_reference", "future_original", "no_finding",
-                                    "recovery_same_turn", "judge_finding_id", "missing_assessment"])
+# The saved reason names the broken rule so a user can act on it.
+_BROKEN_RULE = {
+    "missing_turn": "missing or extra audit turns",
+    "duplicate_turn": "audit turns must match selected order and identity",
+    "extra_dimension": "audit fields differ from contract",
+    "erased_failure": "retrospective assessment erased original failure",
+    "wrong_quote": "citation quote not present in referenced evidence",
+    "foreign_reference": "citation outside assessment evidence phase",
+    "future_original": "citation outside assessment evidence phase",
+    "no_finding": "audit failure and findings contradict",
+    "recovery_same_turn": "recovery requires an unambiguously later response",
+    "judge_finding_id": "audit fields differ from contract",
+    "missing_assessment": "audit fields differ from contract",
+}
+
+
+@pytest.mark.parametrize("mutation", list(_BROKEN_RULE))
 def test_contradictory_structured_reply_is_saved_error_without_retry(reliability_store, mutation):
     storage, url = reliability_store
     storage.replace_agent_run_bundle(history_bundle())
@@ -245,10 +259,71 @@ def test_contradictory_structured_reply_is_saved_error_without_retry(reliability
     provider = AuditProvider(payload)
     result = run_audit(storage, url, config, provider)
     assert result["status"] == "error"
+    assert result["error"] == "JudgeOutputError"
+    assert result["errorDetail"] == _BROKEN_RULE[mutation]
+    saved = ControlStore(url).history("local", "scoped_evaluation", result["resultId"])[0]["payload"]
+    assert saved["errorDetail"] == _BROKEN_RULE[mutation]
     assert result["dimensions"] == []
     assert provider.calls == 1
     assert run_audit(storage, url, config, provider) == result
     assert provider.calls == 1
+
+
+@pytest.mark.parametrize("aggregation,holistic", [("historical_all_turns", []),
+                                                   ("holistic", ["geometry_check"])])
+def test_audit_request_names_the_exact_required_output(reliability_store, aggregation, holistic):
+    storage, url = reliability_store
+    storage.replace_agent_run_bundle(history_bundle())
+    config = audit_config(aggregation)
+    evidence = preview_scoped(storage, tenant="local", config=config, storage_url=url)["evidencePreview"]
+    payload = audit_reply(evidence, ("PASS", "PASS"))
+    if holistic:
+        payload["holistic"] = {"geometry_check": copy.deepcopy(
+            payload["turns"][1]["dimensions"]["geometry_check"]["retrospective"])}
+    provider = AuditProvider(payload)
+    assert run_audit(storage, url, config, provider)["status"] == "completed"
+    sent = json.loads(provider.request.messages[1]["content"])
+    assert sent["requiredOutput"] == {"turns": ["T1", "T2"], "dimensions": ["geometry_check"],
+                                      "holistic": holistic}
+
+
+@pytest.mark.parametrize("quote,accepted", [
+    ("A hexagon has five sides. It is a polygon.", True),          # paragraph break quoted as a space
+    ("A hexagon has five\tsides.\u00a0It is a polygon.", True),  # tab and no-break space
+    ("  A hexagon has five sides.  ", True),
+    ("A hexagon has five sides... a polygon.", False),            # elided passage
+    ("A hexagon has six sides. It is a polygon.", False),         # changed word
+    ("A hexagon has fivesides.", False),                          # removed word boundary
+])
+def test_quote_check_ignores_only_whitespace(reliability_store, quote, accepted):
+    storage, url = reliability_store
+    storage.replace_agent_run_bundle(history_bundle(("A hexagon has five sides.\n\nIt is a polygon.",)))
+    config = audit_config()
+    evidence = preview_scoped(storage, tenant="local", config=config, storage_url=url)["evidencePreview"]
+    payload = audit_reply(evidence, ("FAIL",))
+    payload["turns"][0]["dimensions"]["geometry_check"]["original"]["citations"][0]["quote"] = quote
+    result = run_audit(storage, url, config, AuditProvider(payload))
+    if accepted:
+        assert result["status"] == "completed", result
+        # The judge's own quote is kept as written.
+        assert result["turnAssessments"][0]["original"]["citations"][0]["quote"] == quote
+    else:
+        assert result["errorDetail"] == "citation quote not present in referenced evidence"
+
+
+def test_non_judge_failure_keeps_only_its_type(reliability_store):
+    storage, url = reliability_store
+    storage.replace_agent_run_bundle(history_bundle())
+    config = audit_config()
+
+    class FailingProvider(AuditProvider):
+        def complete(self, request):
+            self.calls += 1
+            raise RuntimeError("provider said: A hexagon has five sides")
+
+    result = run_audit(storage, url, config, FailingProvider({}))
+    assert (result["status"], result["error"], result["errorDetail"]) == ("error", "RuntimeError", None)
+    assert "hexagon" not in json.dumps(result)
 
 
 def test_real_citation_does_not_claim_entailment_validation(reliability_store):
