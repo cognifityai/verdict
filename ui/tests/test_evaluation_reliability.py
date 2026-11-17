@@ -343,8 +343,6 @@ def test_real_citation_does_not_claim_entailment_validation(reliability_store):
 @pytest.mark.parametrize("prefix,suffix", [("[", ""), ("[", ",]"), ("[[", "")])
 def test_malformed_array_audit_saves_error_and_replays_without_a_call(
         reliability_store, monkeypatch, prefix, suffix):
-    import verdict.dashboard.scoped_evaluation as scoped
-
     class WrappedProvider(AuditProvider):
         def complete(self, request):
             response = super().complete(request)
@@ -355,7 +353,7 @@ def test_malformed_array_audit_saves_error_and_replays_without_a_call(
     config = audit_config()
     preview = preview_scoped(storage, tenant="local", config=config, storage_url=url)
     provider = WrappedProvider(audit_reply(preview["evidencePreview"], ("PASS",)))
-    monkeypatch.setattr(scoped, "_provider", lambda _: provider)
+    monkeypatch.setattr("verdict.dashboard.scoped_evaluation._provider", lambda _: provider)
 
     async def scenario():
         app = create_app(storage=url, tenant_id="local")
