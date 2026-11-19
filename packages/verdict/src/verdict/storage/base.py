@@ -11,7 +11,7 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from verdict.agent_judgment import AgentTurnJudgment, TurnToolCounts
+from verdict.agent_judgment import AgentTurnJudgment, TurnEvidence
 from verdict.analysis_records import (
     DeterministicAnalysisRun,
     NotificationDeliveryAttempt,
@@ -98,6 +98,27 @@ def _validate_evaluator_judgment_query(
         raise ValueError("limit must be between 1 and 100001")
 
 
+def _validate_turn_judgment_page(
+    tenant_id: str, evaluator_fingerprint: str, limit: int,
+    after: tuple[str, str] | None,
+) -> None:
+    _validate_evaluator_judgment_query(tenant_id, evaluator_fingerprint, limit)
+    if limit > 1_000:
+        raise ValueError("limit must be between 1 and 1000")
+    if after is not None and (
+        not isinstance(after, tuple) or len(after) != 2
+        or any(not isinstance(value, str) or not value or "\x00" in value
+               or len(value.encode("utf-8")) > 256 for value in after)
+    ):
+        raise ValueError("invalid Turn judgment cursor")
+
+
+def _judgment_page_after(after: tuple[str, str] | None) -> tuple[str, str, str]:
+    """Keyset parameters; the empty string sorts before every bounded ID."""
+    run_id, turn_id = after or ("", "")
+    return run_id, run_id, turn_id
+
+
 @runtime_checkable
 class Storage(Protocol):
     """Persistent backing store for Traces, Judgments, and DriftSignals.
@@ -149,18 +170,20 @@ class Storage(Protocol):
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
         tool_evidence: bool = False,
+        next_message: bool = False,
     ) -> tuple[
         list[tuple[AgentTurn, JudgmentStatus | None] |
-             tuple[AgentTurn, JudgmentStatus | None, TurnToolCounts]], bool,
-    ]: ...
+             tuple[AgentTurn, JudgmentStatus | None, TurnEvidence]], bool,
+    ]:
+        """List bounded candidates; the third item is the one requested projection."""
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str: ...
 
     def get_agent_turn_evaluation_candidate(
         self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
-        *, tool_evidence: bool = False,
+        *, tool_evidence: bool = False, next_message: bool = False,
     ) -> (tuple[AgentTurn, JudgmentStatus | None] |
-          tuple[AgentTurn, JudgmentStatus | None, TurnToolCounts] | None): ...
+          tuple[AgentTurn, JudgmentStatus | None, TurnEvidence] | None): ...
 
     def agent_turn_judge_guard(
         self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
@@ -187,7 +210,20 @@ class Storage(Protocol):
         *,
         evaluator_fingerprint: str | None = None,
         tool_evidence_mode: str | None = None,
-    ) -> LogicalSessionEvidence: ...
+    ) -> LogicalSessionEvidence:
+        """Load session evidence; ``tool_evidence_mode`` names any Turn evidence mode."""
+
+    def list_agent_turn_judgments(
+        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 500,
+        after: tuple[str, str] | None = None,
+    ) -> tuple[list[AgentTurnJudgment], tuple[str, str] | None]:
+        """Page one evaluator's stored Turn results by (run_id, turn_id).
+
+        Malformed slots are dropped from the page, never from the cursor: the
+        cursor follows the last stored row, and is ``None`` after the last page.
+        Whether a result is current for its Turn's evidence is what
+        ``list_agent_turn_evaluation_candidates`` reports.
+        """
 
     def list_agent_turn_evaluator_identities(
         self,

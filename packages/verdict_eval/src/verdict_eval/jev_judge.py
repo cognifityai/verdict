@@ -120,20 +120,24 @@ class JevJudge:
         context: str | None = None,
         trace_id: str = "",
         tool_evidence: str | None = None,
+        next_message: str | None = None,
     ) -> Judgment:
         identity = self.evaluator_identity(context)
         dimensions = self.score(
             query=query, response=response, context=context,
-            tool_evidence=tool_evidence,
+            tool_evidence=tool_evidence, next_message=next_message,
         )
         return Judgment(trace_id=trace_id, dimensions=dimensions, **identity)
 
     def score(
         self, *, query: str, response: str, context: str | None = None,
         tool_evidence: str | None = None,
+        next_message: str | None = None,
     ) -> list[DimensionScore]:
         if tool_evidence is not None:
             raise ValueError("Jev does not support recorded tool evidence")
+        if next_message is not None:
+            raise ValueError("Jev does not support next-message evidence")
         try:
             from typesafe_sdk import Choice, TypeSafeClient
         except ImportError as exc:

@@ -29,12 +29,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from verdict.agent_judgment import (
+    NEXT_MESSAGE_MODE,
     TOOL_EVIDENCE_MODE,
+    TURN_EVIDENCE_MODES,
     AgentTurnJudgment,
+    RunPlacement,
+    TurnEvidence,
     TurnToolCounts,
+    next_user_messages,
+    requested_turn_evidence_mode,
     sanitized_turn_judgment,
     trusted_turn_judgment,
     turn_evidence_fingerprint,
+    turn_evidence_mode,
     turn_evidence_reason,
     turn_judgment_write_decision,
     validate_turn_scan,
@@ -159,15 +166,17 @@ from verdict.session_monitoring import (
     logical_session_turn_evidence,
 )
 from verdict.storage.base import (
+    _judgment_page_after,
     _validate_agent_bundle_query,
     _validate_agent_bundle_run_id,
     _validate_drift_run_snapshot,
     _validate_evaluator_judgment_query,
+    _validate_turn_judgment_page,
 )
 from verdict.storage.run_monitor_facts import read_run_monitor_facts
 from verdict.storage.turn_tool_evidence import (
-    read_turn_tool_counts,
-    read_turn_tool_counts_batch,
+    read_turn_evidence,
+    read_turn_evidence_batch,
     tool_origin_aggregate_sql,
 )
 
@@ -2129,15 +2138,19 @@ class PostgresStorage:
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
         tool_evidence: bool = False,
+        next_message: bool = False,
     ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]:
         validate_turn_scan(tenant_id, evaluator_fingerprint, limit, before)
+        mode = requested_turn_evidence_mode(
+            tool_evidence=tool_evidence, next_message=next_message,
+        )
         cursor_clause = "AND (t.started_at,t.run_id,t.turn_id) < (%s,%s,%s)" if before else ""
         params = [evaluator_fingerprint, tenant_id]
         if before:
             params.extend(before)
         params.append(limit + 1)
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
-            if tool_evidence:
+            if mode:
                 cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             cur.execute(
                 "SELECT t.*, j.evidence_fingerprint AS judgment_evidence,"
@@ -2154,18 +2167,14 @@ class PostgresStorage:
             )
             columns = [column.name for column in cur.description]
             rows = [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
-            counts_by_turn = (
-                read_turn_tool_counts_batch(
-                    cur, postgres=True, tenant_id=tenant_id,
-                    turn_keys=[(row["run_id"], row["turn_id"]) for row in rows[:limit]],
-                ) if tool_evidence else {}
+            counts_by_turn = read_turn_evidence_batch(
+                cur, mode, postgres=True, tenant_id=tenant_id,
+                turn_keys=[(row["run_id"], row["turn_id"]) for row in rows[:limit]],
             )
             items = []
             for row in rows[:limit]:
                 turn = agent_turn_from_row(row)
-                counts = (
-                    counts_by_turn[(turn.run_id, turn.turn_id)] if tool_evidence else None
-                )
+                counts = counts_by_turn[(turn.run_id, turn.turn_id)] if mode else None
                 current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn, counts)
                            and turn_evidence_reason(turn) is None
                            and (counts is None or counts.unavailable_reason is None))
@@ -2175,12 +2184,10 @@ class PostgresStorage:
                     evaluator_fingerprint=evaluator_fingerprint,
                     evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
                 )
-                if trusted is not None and (
-                    trusted.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
-                ) != tool_evidence:
+                if trusted is not None and turn_evidence_mode(trusted.evaluator_config) != mode:
                     trusted = None
                 item = (turn, trusted.status if trusted else None)
-                items.append((*item, counts) if tool_evidence else item)
+                items.append((*item, counts) if mode else item)
         return items, len(rows) > limit
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str:
@@ -2212,12 +2219,10 @@ class PostgresStorage:
                 (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint),
             )
             previous = cur.fetchone()
-            tool_counts = (
-                read_turn_tool_counts(
-                    cur, postgres=True, tenant_id=judgment.tenant_id,
-                    run_id=judgment.run_id, turn_id=judgment.turn_id,
-                ) if judgment.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
-                else None
+            tool_counts = read_turn_evidence(
+                cur, turn_evidence_mode(judgment.evaluator_config),
+                postgres=True, tenant_id=judgment.tenant_id,
+                run_id=judgment.run_id, turn_id=judgment.turn_id,
             )
             decision = turn_judgment_write_decision(
                 agent_turn_from_row(turn) if turn else None, judgment,
@@ -2246,11 +2251,14 @@ class PostgresStorage:
 
     def get_agent_turn_evaluation_candidate(
         self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
-        *, tool_evidence: bool = False,
+        *, tool_evidence: bool = False, next_message: bool = False,
     ) -> tuple | None:
         validate_turn_scan(tenant_id, evaluator_fingerprint, 1, None)
+        mode = requested_turn_evidence_mode(
+            tool_evidence=tool_evidence, next_message=next_message,
+        )
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
-            if tool_evidence:
+            if mode:
                 cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             cur.execute(
                 "SELECT t.*,j.evidence_fingerprint AS judgment_evidence,"
@@ -2269,9 +2277,9 @@ class PostgresStorage:
                 return None
             row = dict(zip([column.name for column in cur.description], raw, strict=True))
             turn = agent_turn_from_row(row)
-            counts = (read_turn_tool_counts(
-                cur, postgres=True, tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
-            ) if tool_evidence else None)
+            counts = read_turn_evidence(
+                cur, mode, postgres=True, tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
+            )
             current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn, counts)
                        and turn_evidence_reason(turn) is None
                        and (counts is None or counts.unavailable_reason is None))
@@ -2281,12 +2289,10 @@ class PostgresStorage:
                 evaluator_fingerprint=evaluator_fingerprint,
                 evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
             )
-            if trusted is not None and (
-                trusted.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
-            ) != tool_evidence:
+            if trusted is not None and turn_evidence_mode(trusted.evaluator_config) != mode:
                 trusted = None
             item = (turn, trusted.status if trusted else None)
-            return (*item, counts) if tool_evidence else item
+            return (*item, counts) if mode else item
 
     @contextmanager
     def agent_turn_judge_guard(self, tenant_id, run_id, turn_id, evaluator_fingerprint):
@@ -2366,10 +2372,10 @@ class PostgresStorage:
         tool_evidence_mode: str | None = None,
     ) -> LogicalSessionEvidence:
         _validate_agent_bundle_query(tenant_id, 1)
-        if tool_evidence_mode not in {None, TOOL_EVIDENCE_MODE} or (
+        if tool_evidence_mode not in {None, *TURN_EVIDENCE_MODES} or (
             tool_evidence_mode is not None and evaluator_fingerprint is None
         ):
-            raise ValueError("invalid logical-session tool evidence mode")
+            raise ValueError("invalid logical-session Turn evidence mode")
         if evaluator_fingerprint is not None:
             _validate_evaluator_judgment_query(
                 tenant_id, evaluator_fingerprint, MAX_LOGICAL_SESSION_MONITOR_TURNS,
@@ -2377,7 +2383,7 @@ class PostgresStorage:
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             run_rows = conn.execute(
-                "SELECT run_id,tenant_id,session_id,started_at,status "
+                "SELECT run_id,tenant_id,session_id,parent_run_id,started_at,status "
                 "FROM agent_runs WHERE tenant_id=%s "
                 "ORDER BY started_at,run_id LIMIT %s",
                 (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS + 1),
@@ -2403,8 +2409,8 @@ class PostgresStorage:
                 turn_bounds[1] > MAX_LOGICAL_SESSION_MONITOR_TURN_TEXT_BYTES
             ):
                 raise ValueError("logical-session preview exceeds bounded Turn text limit")
-            tool_counts: dict[tuple[str, str], TurnToolCounts] = {}
-            if tool_evidence_mode is not None:
+            turn_evidence: dict[tuple[str, str], TurnEvidence] = {}
+            if tool_evidence_mode == TOOL_EVIDENCE_MODE:
                 event_total = conn.execute(
                     "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=%s "
                     "ORDER BY started_at,run_id LIMIT %s) "
@@ -2437,7 +2443,7 @@ class PostgresStorage:
                     "WHERE e.tenant_id=%s GROUP BY e.run_id,e.turn_id",
                     (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS, tenant_id),
                 ).fetchall()
-                tool_counts = {
+                turn_evidence = {
                     (row[0], row[1]): TurnToolCounts(
                         event_count=row[2], calls=row[3], results=row[4],
                         error_results=row[5], unknown_results=row[6],
@@ -2476,6 +2482,26 @@ class PostgresStorage:
                     "WHERE t.tenant_id=%s ORDER BY t.run_id,t.sequence,t.turn_id",
                     (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS, tenant_id),
                 ).fetchall()
+            def full_turn(row) -> AgentTurn:
+                return agent_turn_from_row(dict(zip(
+                    (
+                        "run_id", "turn_id", "sequence", "started_at", "ended_at",
+                        "status", "user_request_redacted", "final_response_redacted",
+                        "request_state", "response_state", "request_truncated",
+                        "response_truncated",
+                    ),
+                    row,
+                    strict=True,
+                )))
+
+            if tool_evidence_mode == NEXT_MESSAGE_MODE:
+                turn_evidence = next_user_messages(
+                    (full_turn(row) for row in turn_rows),
+                    {
+                        row[0]: RunPlacement(row[2], row[3], row[4])
+                        for row in run_rows
+                    },
+                )
             turns_by_run: dict[str, list[LogicalSessionTurnEvidence]] = {}
             for row in turn_rows:
                 if evaluator_fingerprint is None:
@@ -2484,21 +2510,12 @@ class PostgresStorage:
                         status=ExecutionStatus(row[2]), final_output_present=row[3],
                     )
                 else:
-                    turn = agent_turn_from_row(dict(zip(
-                        (
-                            "run_id", "turn_id", "sequence", "started_at", "ended_at",
-                            "status", "user_request_redacted", "final_response_redacted",
-                            "request_state", "response_state", "request_truncated",
-                            "response_truncated",
-                        ),
-                        row,
-                        strict=True,
-                    )))
+                    turn = full_turn(row)
                     projected = logical_session_turn_evidence(
                         turn,
                         calculate_evidence=True,
                         tool_counts=(
-                            tool_counts.get((turn.run_id, turn.turn_id))
+                            turn_evidence.get((turn.run_id, turn.turn_id))
                             if tool_evidence_mode is not None else None
                         ),
                     )
@@ -2506,7 +2523,7 @@ class PostgresStorage:
             runs = [
                 LogicalSessionRunEvidence(
                     run_id=row[0], tenant_id=row[1], session_id=row[2],
-                    started_at=row[3], status=ExecutionStatus(row[4]),
+                    started_at=row[4], status=ExecutionStatus(row[5]),
                     turns=tuple(turns_by_run.get(row[0], ())),
                 )
                 for row in run_rows
@@ -2557,6 +2574,27 @@ class PostgresStorage:
                     if judgment is not None:
                         judgments.append(judgment)
         return LogicalSessionEvidence(tuple(runs), tuple(judgments))
+
+    def list_agent_turn_judgments(
+        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 500,
+        after: tuple[str, str] | None = None,
+    ) -> tuple[list[AgentTurnJudgment], tuple[str, str] | None]:
+        _validate_turn_judgment_page(tenant_id, evaluator_fingerprint, limit, after)
+        rows = self._fetchall(
+            "SELECT run_id,turn_id,evidence_fingerprint,status,result_json "
+            "FROM agent_turn_judgments WHERE tenant_id=%s AND evaluator_fingerprint=%s "
+            "AND (run_id>%s OR (run_id=%s AND turn_id>%s)) "
+            "ORDER BY run_id,turn_id LIMIT %s",
+            (tenant_id, evaluator_fingerprint, *_judgment_page_after(after), limit),
+        )
+        return [
+            judgment for run_id, turn_id, evidence_fingerprint, status, result_json in rows
+            if (judgment := trusted_turn_judgment(
+                result_json, tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
+                evaluator_fingerprint=evaluator_fingerprint,
+                evidence_fingerprint=evidence_fingerprint, status=status,
+            )) is not None
+        ], (tuple(rows[-1][:2]) if len(rows) == limit else None)
 
     def list_agent_turn_evaluator_identities(
         self,

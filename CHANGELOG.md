@@ -6,6 +6,23 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- `verdict-reply-check` judges each agent reply by what the user wrote next:
+  did they understand it, have to correct it, object to what it changed, or find
+  a "done" claim untrue. A model judge reads the request, the reply, and the
+  user's next request in the same session; nobody labels anything. One command
+  judges every eligible reply under one spend cap (`--budget`, default $5)
+  projected from the provider's reported token usage, resumes where it stopped,
+  and prints the four rates with 95% ranges.
+  After a run's last reply, the next request is the first one of the session's
+  next top-level run, so applications that open one run per user message are
+  covered. Sub-agent runs are excluded, because their requests come from
+  another agent. Results are a separate evaluator identity; existing Turn and
+  tool-count results keep their identity and stay current. The logical-session
+  Monitor leaves replies with no possible next message out of the session
+  roll-up instead of counting them as missing.
+
 ### Changed
 
 - A saved scoped evaluation that fails because the judge reply breaks the
