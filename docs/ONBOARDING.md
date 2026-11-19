@@ -721,7 +721,12 @@ samples, choose **Logical session (descriptive)**. Verdict groups runs only by
 their explicit `AgentRun.session_id`, excludes currently nonterminal sessions,
 and reports completion/final-output rates, effects, and coverage. You can also
 select one existing Agent Turn evaluator to aggregate current PASS/FAIL results;
-the preview never invokes a judge. Missing session identities remain missing.
+the preview never invokes a judge. A session counts as passing a dimension only
+when every Turn in it has a current passing result. For an evaluator that used
+the user's next message, such as the reply check, Turns that cannot have a next
+message (the session's last reply and sub-agent replies) are left out of that
+roll-up; a next request that exists but was not captured still counts as
+missing. Missing session identities remain missing.
 Because a currently terminal session may receive a later run and independence
 is not established, this mode is recomputed as of each preview, is not saved or
 activatable, and returns no p-values or alert decision. Grouping facets are not
@@ -1465,6 +1470,50 @@ of an empty successful dashboard.
   deployment or hardware resource.
   Buffered provider writes do not control span survival or trigger a later span
   repair: each ended span is persisted exactly once.
+
+### Reply check
+
+`verdict-reply-check` scores how each agent reply landed with the person who
+received it. A model judge reads the user's request, the agent's final
+response, and the user's next request, then answers four PASS/FAIL questions:
+`understood_reply`, `no_correction_needed`, `stayed_in_scope`, and
+`done_claim_held`. Each is UNCLEAR when the next message gives no sign either
+way. Nobody labels anything; the next message is already in the transcript.
+
+```bash
+export OPENAI_API_KEY=...
+verdict-reply-check --budget 5
+```
+
+The command opens the dashboard's store (or `--storage`), counts what it would
+judge without sending anything, asks before sending, then judges newest replies
+first. Spend is measured from the provider's reported token usage at static list
+prices. Each batch is shrunk until its projected cost fits what is left: the
+first by the static upper bound, later ones from the batch's own estimated input
+size scaled by the measured input ratio, the largest output seen, and a 1.5x
+margin. The run also stops once measured spend reaches the budget. The cap is
+a projection, not a hard limit: when older text needs far more tokens per
+character than anything judged before it (dense non-Latin scripts, for
+example), one batch can run over by its own size. A model with
+no list price is refused, and a provider reply without token usage stops the
+run, because the cap could not be enforced. Run it again to continue; replies
+already judged are not sent again, while replies whose judge call failed are
+retried. `--summary-only` prints the rates without judging.
+
+The next request is the next Turn of the same run or, after a run's last Turn,
+the first Turn of the session's next top-level run. So applications that open
+one run per user message (the `agent_run` example above) are covered when they
+pass `session_id`. Sub-agent runs (`parent_run_id` set) are skipped, because
+their requests come from another agent. The session's last reply, and the last
+reply of a run without a `session_id`, have no next message; a truncated next
+request is skipped too. The text sent is the request
+as redacted at capture, and replies whose text redaction would change are
+skipped. The next message is part of the evidence fingerprint, so a result goes
+stale if it changes, and results never mix with other Turn evaluators. Agent
+Runs detail marks these results "judged with the user's next message".
+
+These rates are a judge's reading of one later message, not the user's own
+labels. Check a sample against labels you trust before relying on them.
 
 ## What needs a key vs. not
 

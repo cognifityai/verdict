@@ -415,6 +415,7 @@ def test_logical_session_preview_uses_only_a_selected_native_turn_evaluator(tmp_
         "label": f"judge · quality v1 · fp {fingerprint[:8]}",
         "expectedDimensions": ["quality"],
         "toolEvidence": "none",
+        "evidenceMode": "none",
     }]
     quality = next(
         metric for metric in response.json()["metrics"]

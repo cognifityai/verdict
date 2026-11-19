@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, ClassVar
+from itertools import pairwise
+from typing import Any, ClassVar, NamedTuple
 
 from verdict.evidence import AgentTurn, EvidenceState, ExecutionStatus
 from verdict.redaction import redact, redact_structure
@@ -18,6 +19,7 @@ _MAX_RESULT_BYTES = 65_536
 MAX_TURN_SCAN = 100
 MAX_TOOL_EVIDENCE_EVENTS = 64
 TOOL_EVIDENCE_MODE = "counts_v1"
+NEXT_MESSAGE_MODE = "next_user_message_v1"
 
 
 class AgentTurnJudgmentStoreError(RuntimeError):
@@ -31,6 +33,7 @@ _DIMENSION_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 class TurnToolCounts:
     """Metadata-only projection; no event content or identifiers can escape."""
 
+    MODE: ClassVar[str] = TOOL_EVIDENCE_MODE
     PROMPT_TEMPLATE: ClassVar[str] = (
         "Recorded tool calls: {calls}\n"
         "Recorded tool results: {results}\n"
@@ -108,6 +111,142 @@ class TurnToolCounts:
             origin_unusable_calls=self.origin_unusable_calls,
         )
 
+    def fingerprint_values(self) -> list[int]:
+        # The total event count bounds eligibility; only these nine counts
+        # are visible to the judge and therefore bind score currentness.
+        return [
+            self.calls, self.results, self.error_results, self.unknown_results,
+            self.mcp_calls, self.application_calls, self.provider_hosted_calls,
+            self.origin_not_captured_calls, self.origin_unusable_calls,
+        ]
+
+
+@dataclass(frozen=True)
+class NextUserMessage:
+    """The user's next request in the same session, already redacted at capture.
+
+    What the user wrote after reading a final response is evidence of how the
+    response landed: understood, corrected, or questioned. The next request is
+    the next Turn of the same run or, after a run's last Turn, the first Turn of
+    the session's next top-level run. A sub-agent run's requests come from
+    another agent, so its Turns are not evaluable in this mode.
+    """
+
+    MODE: ClassVar[str] = NEXT_MESSAGE_MODE
+    PROMPT_TEMPLATE: ClassVar[str] = "{message}"
+
+    text: str | None = None
+    state: EvidenceState = EvidenceState.MISSING
+    truncated: bool = False
+    sub_agent: bool = False
+    # False when no later request exists at all, as opposed to one not captured.
+    has_next: bool = False
+
+    @property
+    def not_applicable(self) -> bool:
+        """No user reaction can exist, so the Turn is outside this measure."""
+        return self.sub_agent or not self.has_next
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        if self.sub_agent:
+            return "next_message_from_agent"
+        if self.truncated:
+            return "next_message_truncated"
+        if self.state is not EvidenceState.PRESENT or not (self.text or "").strip():
+            return "next_message_unavailable"
+        return None
+
+    def prompt_block(self) -> str:
+        if self.unavailable_reason is not None:
+            raise ValueError("next user message is not evaluable")
+        return self.PROMPT_TEMPLATE.format(message=self.text)
+
+    def fingerprint_values(self) -> list[str | None]:
+        return [self.text]
+
+
+TurnEvidence = TurnToolCounts | NextUserMessage
+TURN_EVIDENCE_MODES = (TOOL_EVIDENCE_MODE, NEXT_MESSAGE_MODE)
+# Evaluator configuration keys that record which projection the judge saw.
+_MODE_CONFIG_KEYS = {
+    TOOL_EVIDENCE_MODE: ("tool_evidence_mode", "tool_evidence_template"),
+    NEXT_MESSAGE_MODE: ("next_message_mode", "next_message_template"),
+}
+
+
+def turn_evidence_mode(config: Mapping[str, Any]) -> str | None:
+    """Return the one extra evidence projection a validated evaluator saw."""
+    for mode, (key, _template) in _MODE_CONFIG_KEYS.items():
+        if config.get(key) == mode:
+            return mode
+    return None
+
+
+def requested_turn_evidence_mode(*, tool_evidence: bool, next_message: bool) -> str | None:
+    """Map the storage read flags to one mode; a judge sees at most one projection."""
+    if tool_evidence and next_message:
+        raise ValueError("an Agent Turn evaluator uses at most one evidence projection")
+    return TOOL_EVIDENCE_MODE if tool_evidence else NEXT_MESSAGE_MODE if next_message else None
+
+
+class RunPlacement(NamedTuple):
+    """Where a run sits in its session, for pairing a Turn with the next request."""
+
+    session_id: str | None
+    parent_run_id: str | None
+    started_at: datetime
+
+
+def next_user_message(turn: AgentTurn | None) -> NextUserMessage:
+    """Project the following Turn's request; ``None`` means no following Turn."""
+    if turn is None:
+        return NextUserMessage()
+    return NextUserMessage(
+        text=turn.user_request_redacted,
+        state=turn.request_state,
+        truncated=bool(turn.request_truncated),
+        has_next=True,
+    )
+
+
+def next_user_messages(
+    turns: Iterable[AgentTurn], runs: Mapping[str, RunPlacement],
+) -> dict[tuple[str, str], NextUserMessage]:
+    """Pair every Turn with the user's next request in the same session.
+
+    Within a run the next request is the next Turn by sequence. After a run's
+    last Turn it is the first Turn of the next top-level run of the same
+    session, ordered by run start and run ID; storage pairs Turns the same way
+    in SQL. Turns of sub-agent runs are marked, never paired.
+    """
+    by_run: dict[str, list[AgentTurn]] = {}
+    for turn in turns:
+        by_run.setdefault(turn.run_id, []).append(turn)
+    for run_turns in by_run.values():
+        run_turns.sort(key=lambda turn: (turn.sequence, turn.turn_id))
+    by_session: dict[str, list[str]] = {}
+    for run_id in by_run:
+        placement = runs.get(run_id)
+        if placement and placement.session_id is not None and placement.parent_run_id is None:
+            by_session.setdefault(placement.session_id, []).append(run_id)
+    first_turn_of_next_run: dict[str, AgentTurn] = {}
+    for run_ids in by_session.values():
+        run_ids.sort(key=lambda run_id: (runs[run_id].started_at, run_id))
+        for current, following in pairwise(run_ids):
+            first_turn_of_next_run[current] = by_run[following][0]
+    result = {}
+    for run_id, run_turns in by_run.items():
+        placement = runs.get(run_id)
+        if placement is not None and placement.parent_run_id is not None:
+            for turn in run_turns:
+                result[(run_id, turn.turn_id)] = NextUserMessage(sub_agent=True)
+            continue
+        following = [*run_turns[1:], first_turn_of_next_run.get(run_id)]
+        for current, after in zip(run_turns, following, strict=True):
+            result[(run_id, current.turn_id)] = next_user_message(after)
+    return result
+
 
 _TOOL_ORIGIN_CODES = frozenset(
     {"mcp", "application", "provider_hosted", "not_captured", "unusable"}
@@ -157,24 +296,15 @@ def tool_counts_from_rows(rows: list[tuple]) -> TurnToolCounts:
     )
 
 
-def turn_evidence_fingerprint(turn: AgentTurn, tool_counts: TurnToolCounts | None = None) -> str:
+def turn_evidence_fingerprint(turn: AgentTurn, evidence: TurnEvidence | None = None) -> str:
     """Bind a result to the exact redacted evidence and eligibility state."""
     payload = [
         turn.status.value, turn.request_state.value, turn.response_state.value,
         turn.user_request_redacted, turn.final_response_redacted,
         turn.request_truncated, turn.response_truncated,
     ]
-    if tool_counts is not None:
-        # The total event count bounds eligibility; only these nine counts
-        # are visible to the judge and therefore bind score currentness.
-        payload.extend([TOOL_EVIDENCE_MODE, [
-            tool_counts.calls, tool_counts.results,
-            tool_counts.error_results, tool_counts.unknown_results,
-            tool_counts.mcp_calls, tool_counts.application_calls,
-            tool_counts.provider_hosted_calls,
-            tool_counts.origin_not_captured_calls,
-            tool_counts.origin_unusable_calls,
-        ]])
+    if evidence is not None:
+        payload.extend([evidence.MODE, evidence.fingerprint_values()])
     return hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
@@ -261,13 +391,19 @@ class AgentTurnJudgment:
         self.evaluator_config = redact_structure(self.evaluator_config)
         if not isinstance(self.evaluator_config, dict):
             raise ValueError("invalid evaluator config")
-        mode = self.evaluator_config.get("tool_evidence_mode")
-        template = self.evaluator_config.get("tool_evidence_template")
-        if mode is None:
-            if "tool_evidence_mode" in self.evaluator_config or template is not None:
-                raise ValueError("invalid tool evidence configuration")
-        elif mode != TOOL_EVIDENCE_MODE or not isinstance(template, str) or not template:
-            raise ValueError("invalid tool evidence configuration")
+        configured = 0
+        for expected, (mode_key, template_key) in _MODE_CONFIG_KEYS.items():
+            mode = self.evaluator_config.get(mode_key)
+            template = self.evaluator_config.get(template_key)
+            if mode is None:
+                if mode_key in self.evaluator_config or template is not None:
+                    raise ValueError("invalid Turn evidence configuration")
+            elif mode != expected or not isinstance(template, str) or not template:
+                raise ValueError("invalid Turn evidence configuration")
+            else:
+                configured += 1
+        if configured > 1:
+            raise ValueError("invalid Turn evidence configuration")
         self.evaluator_provider = redact(self.evaluator_provider) or ""
         self.rubric_version = redact(self.rubric_version) or ""
         self.judge_models = [redact(model) or "" for model in self.judge_models]
@@ -353,17 +489,15 @@ def validate_turn_scan(
 def turn_judgment_write_decision(
     turn: AgentTurn | None, incoming: AgentTurnJudgment,
     previous: AgentTurnJudgment | None,
-    tool_counts: TurnToolCounts | None = None,
+    evidence: TurnEvidence | None = None,
 ) -> str:
-    mode = incoming.evaluator_config.get("tool_evidence_mode")
-    if mode not in (None, TOOL_EVIDENCE_MODE):
-        return "stale"
-    if mode == TOOL_EVIDENCE_MODE and (
-        tool_counts is None or tool_counts.unavailable_reason is not None
+    mode = turn_evidence_mode(incoming.evaluator_config)
+    if mode is not None and (
+        evidence is None or evidence.MODE != mode or evidence.unavailable_reason is not None
     ):
         return "stale"
     if turn is None or turn_evidence_reason(turn) is not None or (
-        turn_evidence_fingerprint(turn, tool_counts if mode else None)
+        turn_evidence_fingerprint(turn, evidence if mode else None)
         != incoming.evidence_fingerprint
     ):
         return "stale"

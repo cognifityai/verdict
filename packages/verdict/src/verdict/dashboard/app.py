@@ -1459,12 +1459,17 @@ def build_agent_run_detail(
 
     def builder(session: _QuerySession) -> dict:
         from verdict.agent_judgment import (
+            NEXT_MESSAGE_MODE,
             TOOL_EVIDENCE_MODE,
             trusted_turn_judgment,
             turn_evidence_fingerprint,
+            turn_evidence_mode,
             turn_evidence_reason,
         )
-        from verdict.storage.turn_tool_evidence import read_turn_tool_counts_batch
+        from verdict.storage.turn_tool_evidence import (
+            read_next_user_messages_batch,
+            read_turn_tool_counts_batch,
+        )
         page = agent_evidence_queries.load_run_page(
             session, tenant, run_id,
             event_limit=event_limit, event_offset=event_offset,
@@ -1520,17 +1525,28 @@ def build_agent_run_detail(
             evaluator_clause = "AND evaluator_fingerprint=? " if turn_evaluator_fingerprint else ""
             if turn_evaluator_fingerprint:
                 params.append(turn_evaluator_fingerprint)
+            turn_keys = [(turn.run_id, turn.turn_id) for turn in eligible_turns]
             all_counts = read_turn_tool_counts_batch(
                 session, postgres=_is_postgres(configured), tenant_id=tenant,
-                turn_keys=[(turn.run_id, turn.turn_id) for turn in eligible_turns],
-                session=True,
+                turn_keys=turn_keys, session=True,
             )
+            # A store opened without migrations may predate truncation flags;
+            # next-message results cannot be shown current there.
+            all_next_messages = read_next_user_messages_batch(
+                session, postgres=_is_postgres(configured), tenant_id=tenant,
+                turn_keys=turn_keys, session=True,
+            ) if "request_truncated" in session.columns("agent_turns") else {}
             for turn in eligible_turns:
                 fingerprints = {None: turn_evidence_fingerprint(turn)}
                 counts = all_counts[(turn.run_id, turn.turn_id)]
                 if counts.unavailable_reason is None:
                     fingerprints[TOOL_EVIDENCE_MODE] = turn_evidence_fingerprint(turn, counts)
                     counts_by_turn[turn.turn_id] = counts
+                next_message = all_next_messages.get((turn.run_id, turn.turn_id))
+                if next_message is not None and next_message.unavailable_reason is None:
+                    fingerprints[NEXT_MESSAGE_MODE] = turn_evidence_fingerprint(
+                        turn, next_message,
+                    )
                 evidence_by_turn[turn.turn_id] = fingerprints
                 choices = list(fingerprints.values())
                 conditions.append("(turn_id=? AND evidence_fingerprint IN (" +
@@ -1554,14 +1570,15 @@ def build_agent_run_detail(
                 )
                 if result is None:
                     continue
-                mode = result.evaluator_config.get("tool_evidence_mode")
-                if mode is not None and mode != TOOL_EVIDENCE_MODE:
-                    continue
+                mode = turn_evidence_mode(result.evaluator_config)
                 if evidence_by_turn[row["turn_id"]].get(mode) != result.evidence_fingerprint:
                     continue
                 turn_judgments[row["turn_id"]] = {
                     "evaluatorFingerprint": row["evaluator_fingerprint"],
                     "toolEvidence": TOOL_EVIDENCE_MODE if mode == TOOL_EVIDENCE_MODE else "none",
+                    "nextMessageEvidence": (
+                        NEXT_MESSAGE_MODE if mode == NEXT_MESSAGE_MODE else "none"
+                    ),
                     "toolCounts": (
                         {"calls": counts_by_turn[row["turn_id"]].calls,
                          "results": counts_by_turn[row["turn_id"]].results,

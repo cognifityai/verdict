@@ -10,7 +10,8 @@ from typing import Any
 
 from verdict.agent_judgment import (
     AgentTurnJudgment,
-    TurnToolCounts,
+    NextUserMessage,
+    TurnEvidence,
     agent_turn_judgment_to_json,
     turn_evidence_fingerprint,
     turn_evidence_reason,
@@ -57,6 +58,10 @@ class LogicalSessionTurnEvidence:
     status: ExecutionStatus
     final_output_present: bool
     evidence_fingerprint: str | None = None
+    # A Turn the selected evaluator's measure cannot apply to, such as the last
+    # reply of a session under next-message evidence, is left out of judge
+    # roll-ups instead of counting as missing.
+    judge_applicable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +122,7 @@ def logical_session_turn_evidence(
     turn: AgentTurn,
     *,
     calculate_evidence: bool,
-    tool_counts: TurnToolCounts | None = None,
+    tool_counts: TurnEvidence | None = None,
 ) -> LogicalSessionTurnEvidence:
     fingerprint = None
     if calculate_evidence and turn_evidence_reason(turn) is None and (
@@ -133,6 +138,9 @@ def logical_session_turn_evidence(
             and bool((turn.final_response_redacted or "").strip(TEXT_STRIP_CHARACTERS))
         ),
         evidence_fingerprint=fingerprint,
+        judge_applicable=not (
+            isinstance(tool_counts, NextUserMessage) and tool_counts.not_applicable
+        ),
     )
 
 
@@ -140,7 +148,7 @@ def logical_session_run_evidence(
     bundle: AgentRunBundle,
     *,
     calculate_evidence: bool,
-    tool_counts: dict[tuple[str, str], TurnToolCounts] | None = None,
+    tool_counts: dict[tuple[str, str], TurnEvidence] | None = None,
 ) -> LogicalSessionRunEvidence:
     counts = tool_counts or {}
     return LogicalSessionRunEvidence(
@@ -358,6 +366,8 @@ def preview_logical_sessions(
         if evaluator_dimensions:
             for run in runs:
                 for turn in run.turns:
+                    if not turn.judge_applicable:
+                        continue
                     current = judgments.get((turn.run_id, turn.turn_id))
                     if current is None or (
                         turn.evidence_fingerprint is None
