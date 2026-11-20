@@ -13,9 +13,9 @@ from verdict.agent_judgment import (
     NextUserMessage,
     TurnEvidence,
     TurnToolCounts,
+    paired_next_message,
     tool_counts_from_rows,
 )
-from verdict.evidence import EvidenceState
 
 
 def _error_flag_sql(postgres: bool) -> str:
@@ -158,7 +158,8 @@ def _next_turn_joins(postgres: bool) -> str:
     # top-level run that has a Turn. Sub-agent runs never pair. Run IDs break
     # start-time ties in byte order, as in Python and SQLite, whatever the
     # Postgres database collation; the row-value comparison lets the session
-    # index seek to the next run instead of scanning the session.
+    # index seek to the next run instead of scanning the session. Whether the
+    # request came after the reply ended is decided in ``paired_next_message``.
     run_id = 'run_id COLLATE "C"' if postgres else "run_id"
     return (
         "JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id "
@@ -179,12 +180,11 @@ def _next_turn_joins(postgres: bool) -> str:
     )
 
 
-def _next_message(text, state, truncated) -> NextUserMessage:
+def _next_message(text, state, truncated, reply_ended_at, next_started_at) -> NextUserMessage:
     if state is None:
         return NextUserMessage()
-    return NextUserMessage(
-        text=text, state=EvidenceState(state), truncated=bool(truncated), has_next=True,
-    )
+    return paired_next_message(text, state, truncated, reply_ended_at=reply_ended_at,
+                               next_started_at=next_started_at)
 
 
 def read_next_user_messages_batch(
@@ -199,14 +199,15 @@ def read_next_user_messages_batch(
         raise ValueError("invalid bounded Turn evidence page")
     placeholder = "%s" if postgres and not session else "?"
     wanted = ",".join(f"({placeholder},{placeholder})" for _ in turn_keys)
-    columns = ("run_id", "turn_id", "parent_run_id", "n_id", "n_text", "n_state",
-               "n_truncated", "m_text", "m_state", "m_truncated")
+    columns = ("run_id", "turn_id", "parent_run_id", "t_ended", "n_id", "n_text", "n_state",
+               "n_truncated", "n_started", "m_text", "m_state", "m_truncated", "m_started")
     result = cursor.execute(
         f"WITH wanted(run_id,turn_id) AS (VALUES {wanted}) "
-        "SELECT w.run_id,w.turn_id,r.parent_run_id,n.turn_id AS n_id,"
+        "SELECT w.run_id,w.turn_id,r.parent_run_id,t.ended_at AS t_ended,n.turn_id AS n_id,"
         "n.user_request_redacted AS n_text,n.request_state AS n_state,"
-        "n.request_truncated AS n_truncated,m.user_request_redacted AS m_text,"
-        "m.request_state AS m_state,m.request_truncated AS m_truncated "
+        "n.request_truncated AS n_truncated,n.started_at AS n_started,"
+        "m.user_request_redacted AS m_text,m.request_state AS m_state,"
+        "m.request_truncated AS m_truncated,m.started_at AS m_started "
         f"FROM wanted w JOIN agent_turns t ON t.tenant_id={placeholder} "
         "AND t.run_id=w.run_id AND t.turn_id=w.turn_id " + _next_turn_joins(postgres),
         (*(value for key in turn_keys for value in key), tenant_id),
@@ -222,10 +223,12 @@ def read_next_user_messages_batch(
         elif values["n_id"] is not None:
             messages[key] = _next_message(
                 values["n_text"], values["n_state"], values["n_truncated"],
+                values["t_ended"], values["n_started"],
             )
         else:
             messages[key] = _next_message(
                 values["m_text"], values["m_state"], values["m_truncated"],
+                values["t_ended"], values["m_started"],
             )
     return messages
 

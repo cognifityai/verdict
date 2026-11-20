@@ -110,7 +110,8 @@ recorded event and result.
    `verdict-reply-check` judges each reply with the user's next request in the
    same session, so the judge can score how the reply landed. The last reply of
    a session (or of a run without a session), and sub-agent replies, have none
-   and are not judged that way.
+   and are not judged that way; nor is a reply whose next request was sent
+   before it finished.
    Origin labels describe
    only the observed outer dispatch boundary and cannot establish hidden
    downstream protocols. Counts do not prove complete tool use, citation

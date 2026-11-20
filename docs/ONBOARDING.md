@@ -724,9 +724,11 @@ select one existing Agent Turn evaluator to aggregate current PASS/FAIL results;
 the preview never invokes a judge. A session counts as passing a dimension only
 when every Turn in it has a current passing result. For an evaluator that used
 the user's next message, such as the reply check, Turns that cannot have a next
-message (the session's last reply and sub-agent replies) are left out of that
-roll-up; a next request that exists but was not captured still counts as
-missing. Missing session identities remain missing.
+message (the session's last reply, sub-agent replies, and replies whose next
+request was sent before they ended) are left out of that roll-up, and a session
+made only of such Turns is outside the judge metric entirely rather than
+missing; its execution metrics still count. A next request that exists but was
+not captured still counts as missing. Missing session identities remain missing.
 Because a currently terminal session may receive a later run and independence
 is not established, this mode is recomputed as of each preview, is not saved or
 activatable, and returns no p-values or alert decision. Grouping facets are not
@@ -1491,14 +1493,17 @@ first. Spend is measured from the provider's reported token usage at static list
 prices. Each batch is shrunk until its projected cost fits what is left: the
 first by the static upper bound, later ones from the batch's own estimated input
 size scaled by the measured input ratio, the largest output seen, and a 1.5x
-margin. The run also stops once measured spend reaches the budget. The cap is
-a projection, not a hard limit: when older text needs far more tokens per
-character than anything judged before it (dense non-Latin scripts, for
-example), one batch can run over by its own size. A model with
-no list price is refused, and a provider reply without token usage stops the
-run, because the cap could not be enforced. Run it again to continue; replies
-already judged are not sent again, while replies whose judge call failed are
-retried. `--summary-only` prints the rates without judging.
+margin. Before each call, the cost of the largest call seen so far (with the
+same margin) must also fit what is left, so output that grows mid-batch stops
+the run at the next call. The cap is still a projection, not a hard limit: the
+one call that first shows a larger size can take spend past it. A model with
+no list price is refused. Every attempt is counted before it is sent, and once
+a call's cost is unknown no further request is sent: a reply without token
+usage, a timeout, a transport failure, or a server error stops the run, because
+the provider may still bill it. A request the provider rejects unprocessed (a
+non-retryable 4xx) is recorded as that reply's error and the run continues.
+Run it again to continue; replies already judged are not sent again, while
+replies whose judge call failed are retried. `--summary-only` prints the rates without judging.
 
 The next request is the next Turn of the same run or, after a run's last Turn,
 the first Turn of the session's next top-level run. So applications that open
@@ -1506,7 +1511,9 @@ one run per user message (the `agent_run` example above) are covered when they
 pass `session_id`. Sub-agent runs (`parent_run_id` set) are skipped, because
 their requests come from another agent. The session's last reply, and the last
 reply of a run without a `session_id`, have no next message; a truncated next
-request is skipped too. The text sent is the request
+request is skipped too. So is a next request sent before the reply ended (the
+user typed while the agent was still working, or runs overlap), or when either
+time is unknown: it cannot be a reaction to that reply. The text sent is the request
 as redacted at capture, and replies whose text redaction would change are
 skipped. The next message is part of the evidence fingerprint, so a result goes
 stale if it changes, and results never mix with other Turn evaluators. Agent

@@ -62,7 +62,7 @@ response and labeled as untrusted evidence of the user's reaction. It is the
 redacted request of the next Turn in the same run or, after a run's last Turn,
 of the first Turn of the session's next top-level run, ordered by run start and
 run ID. Sub-agent runs are never paired, because their requests come from
-another agent. A judge sees at most one such projection. The mode and template
+another agent, and a request sent before the reply ended is withheld. A judge sees at most one such projection. The mode and template
 are part of evaluator identity, and the message text is in the evidence
 fingerprint. A Turn without a following, present, untruncated request is not
 evaluable in this mode. The reply check uses this mode with a fixed rubric;

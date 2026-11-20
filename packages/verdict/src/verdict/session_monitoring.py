@@ -192,7 +192,7 @@ def _metric_counts(units: list[_SessionUnit], metric: str) -> dict[str, int]:
     for unit in units:
         if metric in unit.metrics:
             result["true" if unit.metrics[metric] else "false"] += 1
-        else:
+        elif unit.metric_states.get(metric) != "not_applicable":
             result[unit.metric_states.get(metric, "missing")] += 1
     return result
 
@@ -363,6 +363,11 @@ def preview_logical_sessions(
             states["agent.final_output_present"] = "missing"
 
         judged_turn_states: list[dict[str, str]] = []
+        # Turns exist but none can be judged in this evidence mode (no possible
+        # reaction): the session is outside the judge metric, not missing it.
+        judge_not_applicable = bool(turns) and not any(
+            turn.judge_applicable for turn in turns
+        )
         if evaluator_dimensions:
             for run in runs:
                 for turn in run.turns:
@@ -386,6 +391,9 @@ def preview_logical_sessions(
 
         for dimension in evaluator_dimensions:
             metric = f"judge.{dimension}.pass"
+            if judge_not_applicable:
+                states[metric] = "not_applicable"
+                continue
             turn_states = [states[dimension] for states in judged_turn_states]
             state = next(
                 (candidate for candidate in _STATE_PRECEDENCE if candidate in turn_states),

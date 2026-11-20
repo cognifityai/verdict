@@ -18,7 +18,7 @@ from collections import Counter
 from collections.abc import Callable
 from typing import Any, TextIO
 
-from verdict.agent_judgment import NEXT_MESSAGE_MODE
+from verdict.agent_judgment import NEXT_MESSAGE_MODE, JudgeCallsHalted
 from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.pricing import compute_cost_usd
 from verdict.schema import JudgmentStatus
@@ -70,6 +70,7 @@ SKIP_MEANS = {
     "next_message_unavailable": "no next message (last reply in the session)",
     "next_message_truncated": "next message was cut off at capture",
     "next_message_from_agent": "sub-agent reply; the next message came from another agent",
+    "next_message_order_unclear": "the next message was sent before the reply finished",
     "redacted_evidence": "redaction would change the text sent to the judge",
     "turn_not_completed": "the agent's turn did not complete",
     "request_unavailable": "the request was not captured",
@@ -85,33 +86,63 @@ _STALE_PLAN_RETRIES = 3
 
 
 class _MeteredProvider:
-    """Measure real token usage per call; the call itself is unchanged."""
+    """Measure real token usage per call and refuse calls the cap cannot cover.
 
-    def __init__(self, inner, model: str) -> None:
+    Every attempt is counted before it is sent. Once a call's cost is unknown
+    (no reported usage, or a failure the provider may still bill), no further
+    request is sent: the spend can no longer be checked against the cap.
+    """
+
+    def __init__(self, inner, model: str, budget_usd: float) -> None:
         self._inner = inner
         self._model = model
+        self._budget_usd = budget_usd
         self.calls = 0
         self.spent_usd = 0.0
         self.input_tokens = 0
         self.max_output_tokens = 0
-        # A call without reported usage cannot be priced, so the cap is void.
-        self.unmeasured = False
+        self.max_call_usd = 0.0
+        self.stop_reason: str | None = None
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
     def complete(self, request):
-        response = self._inner.complete(request)
+        # Once a call has been measured, the next one must fit what is left, so
+        # output that grows mid-batch stops the run at the following call.
+        if self.stop_reason is None and self.max_call_usd and (
+            self.spent_usd + _COST_MARGIN * self.max_call_usd > self._budget_usd
+        ):
+            self.stop_reason = "budget"
+        if self.stop_reason is not None:
+            raise JudgeCallsHalted(self.stop_reason)
         self.calls += 1
+        try:
+            response = self._inner.complete(request)
+        except Exception as exc:
+            if not _rejected_unbilled(exc):
+                self.stop_reason = "provider_error"
+            raise
         if response.input_tokens is None or response.output_tokens is None:
-            self.unmeasured = True
+            self.stop_reason = "usage_unreported"
             return response
+        cost = compute_cost_usd(self._model, response.input_tokens,
+                                response.output_tokens) or 0.0
         self.input_tokens += response.input_tokens
         self.max_output_tokens = max(self.max_output_tokens, response.output_tokens)
-        self.spent_usd += compute_cost_usd(
-            self._model, response.input_tokens, response.output_tokens,
-        ) or 0.0
+        self.max_call_usd = max(self.max_call_usd, cost)
+        self.spent_usd += cost
         return response
+
+
+def _rejected_unbilled(exc: Exception) -> bool:
+    """A non-retryable 4xx means the provider refused the request unprocessed."""
+    from verdict_eval.providers import _RETRYABLE_HTTP_STATUS_CODES, _structured_http_status
+
+    status = _structured_http_status(exc)
+    return status is not None and 400 <= status < 500 and (
+        status not in _RETRYABLE_HTTP_STATUS_CODES
+    )
 
 
 def _config(provider: str, model: str, **extra) -> dict[str, Any]:
@@ -153,7 +184,8 @@ def judge(
 
     if compute_cost_usd(model, 1_000, 1_000) is None:
         raise ValueError(f"no list price for {model}; the spend cap cannot be enforced")
-    meter = _MeteredProvider((provider_factory or evaluator_lab._provider)(provider), model)
+    meter = _MeteredProvider((provider_factory or evaluator_lab._provider)(provider), model,
+                             budget_usd)
     completed = errors = 0
     fingerprint = None
     stopped = None
@@ -210,8 +242,8 @@ def judge(
             if progress:
                 progress({"completed": completed, "errors": errors,
                           "spentUsd": meter.spent_usd})
-            if meter.unmeasured:
-                stopped = "usage_unreported"
+            if meter.stop_reason is not None:
+                stopped = meter.stop_reason
                 break
             if meter.spent_usd >= budget_usd:
                 stopped = "budget"
@@ -365,6 +397,9 @@ def main(argv: list[str] | None = None, *, stdin: TextIO | None = None,
                 if run["stopped"] == "usage_unreported":
                     print("Stopped: the provider did not report token usage, so the spend cap "
                           "cannot be enforced.", file=sys.stderr)
+                if run["stopped"] == "provider_error":
+                    print("Stopped: a judge call failed and may still be billed, so the spend "
+                          "cap cannot be enforced. Run again to continue.", file=sys.stderr)
         summary = summarize(storage, tenant_id=args.tenant, fingerprint=fingerprint)
         if args.json:
             print(json.dumps({"run": run, **summary}, sort_keys=True), file=out)
