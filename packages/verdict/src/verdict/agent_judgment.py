@@ -22,6 +22,10 @@ TOOL_EVIDENCE_MODE = "counts_v1"
 NEXT_MESSAGE_MODE = "next_user_message_v1"
 
 
+class JudgeCallsHalted(Exception):
+    """A provider wrapper refused to send any further judge call in this run."""
+
+
 class AgentTurnJudgmentStoreError(RuntimeError):
     """A persisted Turn result cannot be safely interpreted."""
 
@@ -141,16 +145,21 @@ class NextUserMessage:
     sub_agent: bool = False
     # False when no later request exists at all, as opposed to one not captured.
     has_next: bool = False
+    # The next request was sent before this reply finished, or either time is
+    # unknown, so it cannot be the user's reaction to the reply.
+    order_unclear: bool = False
 
     @property
     def not_applicable(self) -> bool:
         """No user reaction can exist, so the Turn is outside this measure."""
-        return self.sub_agent or not self.has_next
+        return self.sub_agent or self.order_unclear or not self.has_next
 
     @property
     def unavailable_reason(self) -> str | None:
         if self.sub_agent:
             return "next_message_from_agent"
+        if self.order_unclear:
+            return "next_message_order_unclear"
         if self.truncated:
             return "next_message_truncated"
         if self.state is not EvidenceState.PRESENT or not (self.text or "").strip():
@@ -198,15 +207,38 @@ class RunPlacement(NamedTuple):
     started_at: datetime
 
 
-def next_user_message(turn: AgentTurn | None) -> NextUserMessage:
+def _utc(value: datetime | str | None) -> datetime | None:
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if value is not None and value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def paired_next_message(
+    text: str | None, state: EvidenceState | str, truncated: bool, *,
+    reply_ended_at: datetime | str | None, next_started_at: datetime | str | None,
+) -> NextUserMessage:
+    """Project a following request, kept only if it was sent after the reply ended.
+
+    Python pairing and every storage backend build the result here, so the
+    order rule cannot differ between the Monitor and the judge.
+    """
+    ended, started = _utc(reply_ended_at), _utc(next_started_at)
+    if ended is None or started is None or started < ended:
+        return NextUserMessage(has_next=True, order_unclear=True)
+    return NextUserMessage(text=text, state=EvidenceState(state),
+                           truncated=bool(truncated), has_next=True)
+
+
+def next_user_message(turn: AgentTurn | None, *,
+                      reply_ended_at: datetime | None) -> NextUserMessage:
     """Project the following Turn's request; ``None`` means no following Turn."""
     if turn is None:
         return NextUserMessage()
-    return NextUserMessage(
-        text=turn.user_request_redacted,
-        state=turn.request_state,
-        truncated=bool(turn.request_truncated),
-        has_next=True,
+    return paired_next_message(
+        turn.user_request_redacted, turn.request_state, bool(turn.request_truncated),
+        reply_ended_at=reply_ended_at, next_started_at=turn.started_at,
     )
 
 
@@ -218,7 +250,8 @@ def next_user_messages(
     Within a run the next request is the next Turn by sequence. After a run's
     last Turn it is the first Turn of the next top-level run of the same
     session, ordered by run start and run ID; storage pairs Turns the same way
-    in SQL. Turns of sub-agent runs are marked, never paired.
+    in SQL. Turns of sub-agent runs are marked, never paired, and a request
+    sent before the reply ended is withheld.
     """
     by_run: dict[str, list[AgentTurn]] = {}
     for turn in turns:
@@ -244,7 +277,8 @@ def next_user_messages(
             continue
         following = [*run_turns[1:], first_turn_of_next_run.get(run_id)]
         for current, after in zip(run_turns, following, strict=True):
-            result[(run_id, current.turn_id)] = next_user_message(after)
+            result[(run_id, current.turn_id)] = next_user_message(
+                after, reply_ended_at=current.ended_at)
     return result
 
 

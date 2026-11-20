@@ -395,3 +395,99 @@ def test_only_turns_with_no_possible_reaction_leave_the_monitor_roll_up(message,
     assert evidence.judge_applicable is applicable
     assert logical_session_turn_evidence(
         _turn("t", 0, "Q"), calculate_evidence=True).judge_applicable
+
+
+def test_a_request_sent_before_the_reply_ended_is_not_its_reaction():
+    def timed(turn_id, sequence, run_id, started, ended):
+        return _turn(turn_id, sequence, f"Request {turn_id}.", run_id=run_id,
+                     started_at=NOW + timedelta(minutes=started),
+                     ended_at=None if ended is None else NOW + timedelta(minutes=ended))
+
+    turns = [
+        # Same run: the user queued a request while the reply was still running.
+        timed("a-0", 0, "a", 0, 10), timed("a-1", 1, "a", 1, 11),
+        # Across runs: run b's reply ended after run c's request was sent.
+        timed("b-0", 0, "b", 20, 23), timed("c-0", 0, "c", 21, 24),
+        # No end time: the order cannot be told.
+        timed("d-0", 0, "d", 30, None), timed("d-1", 1, "d", 31, 32),
+        # A request sent exactly when the reply ended still follows it.
+        timed("e-0", 0, "e", 40, 41), timed("e-1", 1, "e", 41, 42),
+    ]
+    runs = {run_id: RunPlacement(session, None, NOW + timedelta(minutes=start))
+            for run_id, session, start in
+            (("a", "s1", 0), ("b", "s2", 20), ("c", "s2", 21), ("d", "s3", 30),
+             ("e", "s4", 40))}
+    messages = next_user_messages(turns, runs)
+    for key in (("a", "a-0"), ("b", "b-0"), ("d", "d-0")):
+        assert messages[key].unavailable_reason == "next_message_order_unclear", key
+        assert messages[key].not_applicable, key
+    assert messages[("e", "e-0")].text == "Request e-1."
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite", "postgres"])
+def test_storage_withholds_overlapping_pairs_like_the_monitor(tmp_path, backend):
+    storage, tenant = _storage(backend, tmp_path)
+    try:
+        def run(run_id, minutes, spans, **fields):
+            storage.replace_agent_run_bundle(_bundle(
+                tenant,
+                [_turn(f"{run_id}-{index}", index, f"Request {run_id}-{index}.",
+                       run_id=run_id, started_at=NOW + timedelta(minutes=start),
+                       ended_at=NOW + timedelta(minutes=end))
+                 for index, (start, end) in enumerate(spans)],
+                run_id=run_id, started_at=NOW + timedelta(minutes=minutes), **fields,
+            ))
+
+        run("q", 0, [(0, 10), (1, 11), (12, 13)], session_id="s")
+        run("r", 20, [(20, 23)], session_id="t")
+        run("u", 21, [(21, 24)], session_id="t")
+
+        rows, _ = storage.list_agent_turn_evaluation_candidates(
+            tenant, EVALUATOR, next_message=True)
+        messages = {turn.turn_id: message for turn, _, message in rows}
+        assert messages["q-0"].unavailable_reason == "next_message_order_unclear"
+        assert messages["q-1"].text == "Request q-2."
+        assert messages["r-0"].unavailable_reason == "next_message_order_unclear"
+        assert storage.get_agent_turn_evaluation_candidate(
+            tenant, "q", "q-0", EVALUATOR, next_message=True,
+        )[2] == messages["q-0"]
+
+        evidence = storage.load_logical_session_monitor_evidence(
+            tenant, evaluator_fingerprint=EVALUATOR, tool_evidence_mode=NEXT_MESSAGE_MODE)
+        applicable = {turn.turn_id: turn.judge_applicable
+                      for run_evidence in evidence.runs for turn in run_evidence.turns}
+        assert applicable == {"q-0": False, "q-1": True, "q-2": False,
+                              "r-0": False, "u-0": False}
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite", "postgres"])
+def test_a_session_with_no_possible_reaction_is_outside_reaction_coverage(tmp_path, backend):
+    from verdict.session_monitoring import preview_logical_sessions
+
+    storage, tenant = _storage(backend, tmp_path)
+    try:
+        judged = _run_one()
+        storage.replace_agent_run_bundle(_bundle(tenant, judged, session_id="judged"))
+        # A completed one-reply session: nothing came after, so no reaction exists.
+        storage.replace_agent_run_bundle(_bundle(
+            tenant, [_turn("lone-0", 0, "Explain retries.", run_id="lone")],
+            run_id="lone", started_at=NOW + timedelta(hours=1), session_id="lone"))
+        message = NextUserMessage("That broke the upload, revert it.", EvidenceState.PRESENT)
+        assert storage.save_agent_turn_judgment_if_current(
+            _judgment(tenant, judged[0], message)) == "saved"
+
+        evidence = storage.load_logical_session_monitor_evidence(
+            tenant, evaluator_fingerprint=EVALUATOR, tool_evidence_mode=NEXT_MESSAGE_MODE)
+        preview = preview_logical_sessions(
+            evidence, tenant_id=tenant, reference_ratio=0.5, evaluator_fingerprint=EVALUATOR,
+            evaluator_dimensions=("no_correction_needed",))
+        metrics = {item["metric"]: item for item in preview.payload["metrics"]}
+        reaction = metrics["judge.no_correction_needed.pass"]
+        assert (reaction["currentMissing"], reaction["currentEvaluable"]) == (0, 0)
+        assert reaction["referenceEvaluable"] == 1
+        # Execution metrics still count the session.
+        assert metrics["agent.execution_completed"]["currentEvaluable"] == 1
+    finally:
+        storage.close()

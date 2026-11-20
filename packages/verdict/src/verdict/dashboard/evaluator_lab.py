@@ -21,6 +21,7 @@ from verdict.agent_judgment import (
     NEXT_MESSAGE_MODE,
     TOOL_EVIDENCE_MODE,
     AgentTurnJudgment,
+    JudgeCallsHalted,
     NextUserMessage,
     TurnToolCounts,
     turn_evidence_fingerprint,
@@ -776,6 +777,7 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
     from verdict.dashboard.app import evaluator_identity
     dashboard_identity = evaluator_identity(identity)
     completed = errors = stale = in_progress = 0
+    halted = False
     for turn, counts in selected:
         with storage.agent_turn_judge_guard(
             tenant_id, turn.run_id, turn.turn_id, identity["evaluator_fingerprint"],
@@ -814,6 +816,10 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
                     dimensions=dimensions,
                     **identity,
                 )
+            except JudgeCallsHalted:
+                # Nothing was sent for this Turn, so nothing is recorded for it.
+                halted = True
+                break
             except Exception as exc:
                 record = AgentTurnJudgment(
                     tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
@@ -841,7 +847,7 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
         "availableTurns": len(rows), "eligible": eligible,
         "plannedCalls": len(selected), "alreadyJudged": already,
         "completed": completed, "errors": errors, "stale": stale,
-        "inProgress": in_progress,
+        "inProgress": in_progress, "halted": halted,
         "hasMore": next_cursor is not None, "nextCursor": next_cursor,
         "notEvaluable": sum(reasons.values()), "notEvaluableReasons": dict(sorted(reasons.items())),
         "evaluatorFingerprint": identity["evaluator_fingerprint"],

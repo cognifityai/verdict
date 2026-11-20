@@ -313,7 +313,7 @@ def test_unreported_usage_stops_the_run(tmp_path, monkeypatch):
         run = reply_check.judge(storage, tenant_id=LOCAL_TENANT, provider="openai",
                                 model=MODEL, budget_usd=100)
         assert run["stopped"] == "usage_unreported"
-        assert provider.calls == 5
+        assert provider.calls == 1
     finally:
         storage.close()
 
@@ -360,5 +360,98 @@ def test_a_malformed_stored_result_does_not_end_the_summary_early(tmp_path, judg
         assert len(page) == 2 and after == ("long", "long-2")
         assert reply_check.summarize(
             storage, tenant_id=LOCAL_TENANT, fingerprint=fingerprint)["judged"] == 6
+    finally:
+        storage.close()
+
+
+class _UsageStopsAfter(Judge):
+    """Reports usage for the first ``metered`` calls, then fails the given way."""
+
+    def __init__(self, metered, failure):
+        super().__init__()
+        self.metered = metered
+        self.failure = failure
+
+    def complete(self, request):
+        response = super().complete(request)
+        if self.calls <= self.metered:
+            return response
+        if self.failure == "timeout":
+            raise TimeoutError("judge request timed out")
+        return CompletionResponse(text=response.text)
+
+
+@pytest.mark.parametrize(("failure", "stopped"), [
+    ("no_usage", "usage_unreported"), ("timeout", "provider_error"),
+])
+def test_no_request_follows_a_call_whose_cost_is_unknown(tmp_path, monkeypatch,
+                                                         failure, stopped):
+    # Past the first batch, so the unknown cost lands inside a large batch.
+    provider = _UsageStopsAfter(7, failure)
+    monkeypatch.setattr(evaluator_lab, "_provider", lambda name: provider)
+    storage = SQLiteStorage(str(tmp_path / "v.db"))
+    try:
+        storage.replace_agent_run_bundle(_bundle(
+            "long", [f"Request {index}" for index in range(60)], minutes=0))
+        run = reply_check.judge(storage, tenant_id=LOCAL_TENANT, provider="openai",
+                                model=MODEL, budget_usd=100)
+        assert run["stopped"] == stopped
+        assert provider.calls == 8
+        # Every attempt is reported, including the one that failed, and replies
+        # that were never sent leave no error result behind.
+        assert run["calls"] == 8
+        assert run["errors"] == (1 if failure == "timeout" else 0)
+    finally:
+        storage.close()
+
+
+def test_output_that_grows_mid_batch_stops_at_the_next_call(tmp_path, monkeypatch):
+    class Growing(Judge):
+        def complete(self, request):
+            response = super().complete(request)
+            tokens = 200 if self.calls <= 5 else 60_000
+            return CompletionResponse(text=response.text, input_tokens=1_000,
+                                      output_tokens=tokens)
+
+    provider = Growing()
+    monkeypatch.setattr(evaluator_lab, "_provider", lambda name: provider)
+    storage = SQLiteStorage(str(tmp_path / "v.db"))
+    large_call = compute_cost_usd(MODEL, 1_000, 60_000)
+    budget = 5 * compute_cost_usd(MODEL, 1_000, 200) + 3.5 * large_call
+    try:
+        storage.replace_agent_run_bundle(_bundle(
+            "long", [f"Request {index}" for index in range(60)], minutes=0))
+        run = reply_check.judge(storage, tenant_id=LOCAL_TENANT, provider="openai",
+                                model=MODEL, budget_usd=budget)
+        assert run["stopped"] == "budget"
+        # The cap is soft by at most the one call that first showed the larger size.
+        assert run["spentUsd"] <= budget + large_call
+    finally:
+        storage.close()
+
+
+def test_a_rejected_request_is_recorded_and_the_run_continues(tmp_path, monkeypatch):
+    class Rejected(Exception):
+        status_code = 400
+
+    class RejectsOne(Judge):
+        def complete(self, request):
+            response = super().complete(request)
+            if self.calls == 2:
+                # The provider refused it unprocessed, so it is not billed.
+                raise Rejected("invalid request")
+            return response
+
+    provider = RejectsOne()
+    monkeypatch.setattr(evaluator_lab, "_provider", lambda name: provider)
+    storage = SQLiteStorage(str(tmp_path / "v.db"))
+    try:
+        storage.replace_agent_run_bundle(_bundle(
+            "long", [f"Request {index}" for index in range(12)], minutes=0))
+        run = reply_check.judge(storage, tenant_id=LOCAL_TENANT, provider="openai",
+                                model=MODEL, budget_usd=100)
+        # Eleven replies have a next message; the rejected one is retried later.
+        assert run["stopped"] is None
+        assert (run["completed"], run["errors"], run["calls"]) == (11, 1, 12)
     finally:
         storage.close()
