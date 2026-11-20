@@ -17,12 +17,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from verdict.agent_judgment import (
+    NEXT_MESSAGE_MODE,
     TOOL_EVIDENCE_MODE,
+    TURN_EVIDENCE_MODES,
     AgentTurnJudgment,
+    RunPlacement,
+    TurnEvidence,
     TurnToolCounts,
+    next_user_messages,
+    requested_turn_evidence_mode,
     sanitized_turn_judgment,
     trusted_turn_judgment,
     turn_evidence_fingerprint,
+    turn_evidence_mode,
     turn_evidence_reason,
     turn_judgment_write_decision,
     validate_turn_scan,
@@ -147,15 +154,17 @@ from verdict.session_monitoring import (
     logical_session_turn_evidence,
 )
 from verdict.storage.base import (
+    _judgment_page_after,
     _validate_agent_bundle_query,
     _validate_agent_bundle_run_id,
     _validate_drift_run_snapshot,
     _validate_evaluator_judgment_query,
+    _validate_turn_judgment_page,
 )
 from verdict.storage.run_monitor_facts import read_run_monitor_facts
 from verdict.storage.turn_tool_evidence import (
-    read_turn_tool_counts,
-    read_turn_tool_counts_batch,
+    read_turn_evidence,
+    read_turn_evidence_batch,
     tool_origin_aggregate_sql,
 )
 
@@ -2108,15 +2117,19 @@ class SQLiteStorage:
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
         tool_evidence: bool = False,
+        next_message: bool = False,
     ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]:
         validate_turn_scan(tenant_id, evaluator_fingerprint, limit, before)
+        mode = requested_turn_evidence_mode(
+            tool_evidence=tool_evidence, next_message=next_message,
+        )
         cursor_clause = "AND (t.started_at,t.run_id,t.turn_id) < (?,?,?)" if before else ""
         params = [evaluator_fingerprint, tenant_id]
         if before:
             params.extend([before[0].isoformat(), before[1], before[2]])
         params.append(limit + 1)
         with self._lock:
-            if tool_evidence:
+            if mode:
                 self._conn.execute("BEGIN")
             try:
                 rows = self._conn.execute(
@@ -2132,18 +2145,14 @@ class SQLiteStorage:
                 + cursor_clause + " ORDER BY t.started_at DESC,t.run_id DESC,t.turn_id DESC LIMIT ?",
                 params,
                 ).fetchall()
-                counts_by_turn = (
-                    read_turn_tool_counts_batch(
-                        self._conn.cursor(), postgres=False, tenant_id=tenant_id,
-                        turn_keys=[(row["run_id"], row["turn_id"]) for row in rows[:limit]],
-                    ) if tool_evidence else {}
+                counts_by_turn = read_turn_evidence_batch(
+                    self._conn.cursor(), mode, postgres=False, tenant_id=tenant_id,
+                    turn_keys=[(row["run_id"], row["turn_id"]) for row in rows[:limit]],
                 )
                 items = []
                 for row in rows[:limit]:
                     turn = agent_turn_from_row(dict(row))
-                    counts = (
-                        counts_by_turn[(turn.run_id, turn.turn_id)] if tool_evidence else None
-                    )
+                    counts = counts_by_turn[(turn.run_id, turn.turn_id)] if mode else None
                     current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn, counts)
                                and turn_evidence_reason(turn) is None
                                and (counts is None or counts.unavailable_reason is None))
@@ -2153,14 +2162,12 @@ class SQLiteStorage:
                         evaluator_fingerprint=evaluator_fingerprint,
                         evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
                     )
-                    if trusted is not None and (
-                        trusted.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
-                    ) != tool_evidence:
+                    if trusted is not None and turn_evidence_mode(trusted.evaluator_config) != mode:
                         trusted = None
                     item = (turn, trusted.status if trusted else None)
-                    items.append((*item, counts) if tool_evidence else item)
+                    items.append((*item, counts) if mode else item)
             finally:
-                if tool_evidence:
+                if mode:
                     self._conn.rollback()
         return items, len(rows) > limit
 
@@ -2183,12 +2190,10 @@ class SQLiteStorage:
                     "AND run_id=? AND turn_id=? AND evaluator_fingerprint=?",
                     (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint),
                 ).fetchone()
-                tool_counts = (
-                    read_turn_tool_counts(
-                        self._conn.cursor(), postgres=False, tenant_id=judgment.tenant_id,
-                        run_id=judgment.run_id, turn_id=judgment.turn_id,
-                    ) if judgment.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
-                    else None
+                tool_counts = read_turn_evidence(
+                    self._conn.cursor(), turn_evidence_mode(judgment.evaluator_config),
+                    postgres=False, tenant_id=judgment.tenant_id,
+                    run_id=judgment.run_id, turn_id=judgment.turn_id,
                 )
                 decision = turn_judgment_write_decision(
                     agent_turn_from_row(dict(row)) if row else None,
@@ -2222,11 +2227,14 @@ class SQLiteStorage:
 
     def get_agent_turn_evaluation_candidate(
         self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
-        *, tool_evidence: bool = False,
+        *, tool_evidence: bool = False, next_message: bool = False,
     ) -> tuple | None:
         validate_turn_scan(tenant_id, evaluator_fingerprint, 1, None)
+        mode = requested_turn_evidence_mode(
+            tool_evidence=tool_evidence, next_message=next_message,
+        )
         with self._lock:
-            if tool_evidence:
+            if mode:
                 self._conn.execute("BEGIN")
             try:
                 row = self._conn.execute(
@@ -2244,10 +2252,10 @@ class SQLiteStorage:
                 if row is None:
                     return None
                 turn = agent_turn_from_row(dict(row))
-                counts = (read_turn_tool_counts(
-                    self._conn.cursor(), postgres=False, tenant_id=tenant_id,
+                counts = read_turn_evidence(
+                    self._conn.cursor(), mode, postgres=False, tenant_id=tenant_id,
                     run_id=run_id, turn_id=turn_id,
-                ) if tool_evidence else None)
+                )
                 current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn, counts)
                            and turn_evidence_reason(turn) is None
                            and (counts is None or counts.unavailable_reason is None))
@@ -2257,14 +2265,12 @@ class SQLiteStorage:
                     evaluator_fingerprint=evaluator_fingerprint,
                     evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
                 )
-                if trusted is not None and (
-                    trusted.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
-                ) != tool_evidence:
+                if trusted is not None and turn_evidence_mode(trusted.evaluator_config) != mode:
                     trusted = None
                 item = (turn, trusted.status if trusted else None)
-                return (*item, counts) if tool_evidence else item
+                return (*item, counts) if mode else item
             finally:
-                if tool_evidence:
+                if mode:
                     self._conn.rollback()
 
     @contextmanager
@@ -2357,10 +2363,10 @@ class SQLiteStorage:
         tool_evidence_mode: str | None = None,
     ) -> LogicalSessionEvidence:
         _validate_agent_bundle_query(tenant_id, 1)
-        if tool_evidence_mode not in {None, TOOL_EVIDENCE_MODE} or (
+        if tool_evidence_mode not in {None, *TURN_EVIDENCE_MODES} or (
             tool_evidence_mode is not None and evaluator_fingerprint is None
         ):
-            raise ValueError("invalid logical-session tool evidence mode")
+            raise ValueError("invalid logical-session Turn evidence mode")
         if evaluator_fingerprint is not None:
             _validate_evaluator_judgment_query(
                 tenant_id, evaluator_fingerprint, MAX_LOGICAL_SESSION_MONITOR_TURNS,
@@ -2369,7 +2375,7 @@ class SQLiteStorage:
             self._conn.execute("BEGIN")
             try:
                 run_rows = self._conn.execute(
-                    "SELECT run_id,tenant_id,session_id,started_at,status "
+                    "SELECT run_id,tenant_id,session_id,parent_run_id,started_at,status "
                     "FROM agent_runs WHERE tenant_id=? "
                     "ORDER BY started_at,run_id LIMIT ?",
                     (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS + 1),
@@ -2395,8 +2401,8 @@ class SQLiteStorage:
                     turn_bounds[1] > MAX_LOGICAL_SESSION_MONITOR_TURN_TEXT_BYTES
                 ):
                     raise ValueError("logical-session preview exceeds bounded Turn text limit")
-                tool_counts: dict[tuple[str, str], TurnToolCounts] = {}
-                if tool_evidence_mode is not None:
+                turn_evidence: dict[tuple[str, str], TurnEvidence] = {}
+                if tool_evidence_mode == TOOL_EVIDENCE_MODE:
                     event_total = self._conn.execute(
                         "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=? "
                         "ORDER BY started_at,run_id LIMIT ?) "
@@ -2435,7 +2441,7 @@ class SQLiteStorage:
                         "WHERE e.tenant_id=? GROUP BY e.run_id,e.turn_id",
                         (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS, tenant_id),
                     ).fetchall()
-                    tool_counts = {
+                    turn_evidence = {
                         (row["run_id"], row["turn_id"]): TurnToolCounts(
                             event_count=row["event_count"], calls=row["calls"],
                             results=row["results"], error_results=row["error_results"],
@@ -2476,6 +2482,17 @@ class SQLiteStorage:
                         "WHERE t.tenant_id=? ORDER BY t.run_id,t.sequence,t.turn_id",
                         (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS, tenant_id),
                     ).fetchall()
+                if tool_evidence_mode == NEXT_MESSAGE_MODE:
+                    turn_evidence = next_user_messages(
+                        (agent_turn_from_row(dict(row)) for row in turn_rows),
+                        {
+                            row["run_id"]: RunPlacement(
+                                row["session_id"], row["parent_run_id"],
+                                _parse_iso(row["started_at"]),
+                            )
+                            for row in run_rows
+                        },
+                    )
                 turns_by_run: dict[str, list[LogicalSessionTurnEvidence]] = {}
                 for row in turn_rows:
                     if evaluator_fingerprint is None:
@@ -2490,7 +2507,7 @@ class SQLiteStorage:
                             turn,
                             calculate_evidence=True,
                             tool_counts=(
-                                tool_counts.get((turn.run_id, turn.turn_id))
+                                turn_evidence.get((turn.run_id, turn.turn_id))
                                 if tool_evidence_mode is not None else None
                             ),
                         )
@@ -2552,6 +2569,27 @@ class SQLiteStorage:
             finally:
                 self._conn.rollback()
         return LogicalSessionEvidence(tuple(runs), tuple(judgments))
+
+    def list_agent_turn_judgments(
+        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 500,
+        after: tuple[str, str] | None = None,
+    ) -> tuple[list[AgentTurnJudgment], tuple[str, str] | None]:
+        _validate_turn_judgment_page(tenant_id, evaluator_fingerprint, limit, after)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT run_id,turn_id,evidence_fingerprint,status,result_json "
+                "FROM agent_turn_judgments WHERE tenant_id=? AND evaluator_fingerprint=? "
+                "AND (run_id>? OR (run_id=? AND turn_id>?)) ORDER BY run_id,turn_id LIMIT ?",
+                (tenant_id, evaluator_fingerprint, *_judgment_page_after(after), limit),
+            ).fetchall()
+        return [
+            judgment for row in rows
+            if (judgment := trusted_turn_judgment(
+                row["result_json"], tenant_id=tenant_id, run_id=row["run_id"],
+                turn_id=row["turn_id"], evaluator_fingerprint=evaluator_fingerprint,
+                evidence_fingerprint=row["evidence_fingerprint"], status=row["status"],
+            )) is not None
+        ], ((rows[-1]["run_id"], rows[-1]["turn_id"]) if len(rows) == limit else None)
 
     def list_agent_turn_evaluator_identities(
         self,

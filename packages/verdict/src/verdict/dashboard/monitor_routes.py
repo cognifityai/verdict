@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from verdict.agent_judgment import NEXT_MESSAGE_MODE, TOOL_EVIDENCE_MODE, turn_evidence_mode
 from verdict.dashboard.setup_routes import SetupRoutes, _is_postgres, _sqlite_path
 from verdict.monitor_inputs import (
     LOCAL_TENANT,
@@ -225,14 +226,15 @@ class MonitorRoutes:
                 "label": (
                     f"{'+'.join(row.judge_models)} · "
                     f"{row.rubric_name} v{row.rubric_version} · "
+                    f"{'with next message · ' if mode == NEXT_MESSAGE_MODE else ''}"
                     f"fp {row.evaluator_fingerprint[:8]}"
                 ),
                 "expectedDimensions": list(row.expected_dimensions),
-                "toolEvidence": (
-                    row.evaluator_config.get("tool_evidence_mode") or "none"
-                ),
+                "toolEvidence": mode if mode == TOOL_EVIDENCE_MODE else "none",
+                "evidenceMode": mode or "none",
             }
             for row in rows
+            for mode in (turn_evidence_mode(row.evaluator_config),)
         ], bool(getattr(page, "truncated", False))
 
     def logical_session_preview(
@@ -281,9 +283,9 @@ class MonitorRoutes:
             self.tenant_id,
             evaluator_fingerprint=fingerprint,
             tool_evidence_mode=(
-                evaluators[fingerprint]["toolEvidence"]
+                evaluators[fingerprint]["evidenceMode"]
                 if fingerprint is not None
-                and evaluators[fingerprint]["toolEvidence"] != "none"
+                and evaluators[fingerprint]["evidenceMode"] != "none"
                 else None
             ),
         )

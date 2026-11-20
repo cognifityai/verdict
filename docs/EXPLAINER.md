@@ -106,7 +106,13 @@ recorded event and result.
    results, errors, and explicit producer-recorded dispatch origins. Missing and
    unusable origins remain separate buckets. Tool-event names, IDs, arguments,
    result bodies, and URLs are not added to judge input. No tool events or more
-   than 64 total events makes this option ineligible. Origin labels describe
+   than 64 total events makes this option ineligible. Separately,
+   `verdict-reply-check` judges each reply with the user's next request in the
+   same session, so the judge can score how the reply landed. The last reply of
+   a session (or of a run without a session), and sub-agent replies, have none
+   and are not judged that way; nor is a reply whose next request was sent
+   before it finished.
+   Origin labels describe
    only the observed outer dispatch boundary and cannot establish hidden
    downstream protocols. Counts do not prove complete tool use, citation
    support, or factual grounding, so context-required

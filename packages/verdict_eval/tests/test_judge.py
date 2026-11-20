@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from verdict.agent_judgment import TurnToolCounts
 from verdict.schema import Verdict
 from verdict_eval.judge import (
     DEFAULT_RUBRIC,
@@ -372,3 +373,69 @@ def test_identity_records_per_model_temperature_support():
     assert omitted["evaluator_config"]["temperature_applied"] is False
     assert omitted["evaluator_config"]["temperature"] is None
     assert omitted["evaluator_config"]["requested_temperature"] == 0.0
+
+
+_ONE_DIMENSION = Rubric("reaction", "1", (RubricDimension("no_correction_needed", "No fix."),))
+
+
+def _reaction_judge(provider, **mode) -> Judge:
+    return Judge(provider=provider, model="m", rubric=_ONE_DIMENSION, **mode)
+
+
+def test_existing_judge_identities_do_not_change_with_next_message_support() -> None:
+    class Provider:
+        name = "openai"
+        supports_temperature = True
+
+    # Pinned from the release before next-message evidence existed.
+    assert Judge(provider=Provider(), model="m").evaluator_identity()[
+        "evaluator_fingerprint"
+    ] == "ce874feb202279c944e8c97539a63f1f652a1223a92ee5c2502f3210c9c9b8c3"
+    assert Judge(
+        provider=Provider(), model="m", tool_evidence_mode="counts_v1",
+        tool_evidence_template=TurnToolCounts.PROMPT_TEMPLATE,
+    ).evaluator_identity()["evaluator_fingerprint"] == (
+        "618eaaba538d91fa7d81668cdf36bebd1dd7ecd6232e1061e9162bcce9940cf6"
+    )
+
+
+def test_next_message_follows_the_response_and_changes_identity() -> None:
+    prompts = []
+    reply = '{"no_correction_needed":{"reasoning":"user reverted","verdict":"FAIL"}}'
+    provider = FakeProvider(lambda request: prompts.append(request) or reply)
+    judge = _reaction_judge(provider, next_message_mode="next_user_message_v1",
+                            next_message_template="{message}")
+
+    [score] = judge.score(query="Add a retry.", response="Added. Tests pass.",
+                          next_message="  That broke uploads; revert it.  ")
+
+    prompt = prompts[0].messages[-1]["content"]
+    assert score.verdict is Verdict.FAIL
+    assert prompt.index("ASSISTANT RESPONSE:") < prompt.index(
+        "USER'S NEXT MESSAGE (written after reading the response above):\n"
+        "That broke uploads; revert it.\n") < prompt.index("RUBRIC DIMENSIONS:")
+    plain = _reaction_judge(provider)
+    plain.score(query="Add a retry.", response="Added. Tests pass.")
+    assert "USER'S NEXT MESSAGE" not in prompts[1].messages[-1]["content"]
+    assert judge.evaluator_identity()["evaluator_config"]["next_message_mode"] == (
+        "next_user_message_v1")
+    assert judge.evaluator_identity()["evaluator_fingerprint"] != (
+        plain.evaluator_identity()["evaluator_fingerprint"])
+
+
+@pytest.mark.parametrize(("mode", "kwargs", "message"), [
+    ({"next_message_mode": "next_user_message_v1", "next_message_template": "{message}"},
+     {}, "next message does not match"),
+    ({}, {"next_message": "Thanks."}, "next message does not match"),
+    ({"next_message_mode": "next_user_message_v2", "next_message_template": "{message}"},
+     {"next_message": "Thanks."}, "unsupported next-message mode"),
+    ({"next_message_mode": "next_user_message_v1"}, {"next_message": "Thanks."},
+     "template does not match"),
+    ({"next_message_mode": "next_user_message_v1", "next_message_template": "{message}",
+      "tool_evidence_mode": "counts_v1", "tool_evidence_template": "x"},
+     {"next_message": "Thanks.", "tool_evidence": "x"}, "at most one"),
+])
+def test_next_message_mode_must_match_the_evidence(mode, kwargs, message) -> None:
+    provider = FakeProvider(lambda _request: pytest.fail("no provider call expected"))
+    with pytest.raises(ValueError, match=message):
+        _reaction_judge(provider, **mode).score(query="Q", response="A", **kwargs)

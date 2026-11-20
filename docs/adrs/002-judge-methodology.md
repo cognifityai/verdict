@@ -57,6 +57,17 @@ context-dependent dimensions or prove source support. The counts-only mode and
 full count-block template are part of evaluator identity; the projected counts
 are in the bounded evidence fingerprint.
 
+An Agent Turn judge may instead see the user's next message, placed after the
+response and labeled as untrusted evidence of the user's reaction. It is the
+redacted request of the next Turn in the same run or, after a run's last Turn,
+of the first Turn of the session's next top-level run, ordered by run start and
+run ID. Sub-agent runs are never paired, because their requests come from
+another agent, and a request sent before the reply ended is withheld. A judge sees at most one such projection. The mode and template
+are part of evaluator identity, and the message text is in the evidence
+fingerprint. A Turn without a following, present, untruncated request is not
+evaluable in this mode. The reply check uses this mode with a fixed rubric;
+its rates are a judge's reading of one later message, not user labels.
+
 Scoped historical audits are a distinct optional evaluator using one bounded
 structured call. Explicit dimension policies distinguish historical factual
 requirements, final-response completion, and holistic quality. Original-turn

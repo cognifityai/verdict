@@ -65,6 +65,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
+from verdict.agent_judgment import AgentTurnJudgment
 from verdict.analysis_records import (
     DeterministicAnalysisRun,
     NotificationDeliveryAttempt,
@@ -374,18 +375,19 @@ class BufferedStorage:
 
     def list_agent_turn_evaluation_candidates(
         self, tenant_id, evaluator_fingerprint, *, limit=100, before=None,
-        tool_evidence=False,
+        tool_evidence=False, next_message=False,
     ):
         return self._read(self._inner.list_agent_turn_evaluation_candidates,
                           tenant_id, evaluator_fingerprint, limit=limit, before=before,
-                          tool_evidence=tool_evidence)
+                          tool_evidence=tool_evidence, next_message=next_message)
 
     def get_agent_turn_evaluation_candidate(
         self, tenant_id, run_id, turn_id, evaluator_fingerprint, *, tool_evidence=False,
+        next_message=False,
     ):
         return self._read(self._inner.get_agent_turn_evaluation_candidate,
                           tenant_id, run_id, turn_id, evaluator_fingerprint,
-                          tool_evidence=tool_evidence)
+                          tool_evidence=tool_evidence, next_message=next_message)
 
     @contextmanager
     def agent_turn_judge_guard(self, tenant_id, run_id, turn_id, evaluator_fingerprint):
@@ -528,6 +530,15 @@ class BufferedStorage:
             tenant_id,
             evaluator_fingerprint=evaluator_fingerprint,
             tool_evidence_mode=tool_evidence_mode,
+        )
+
+    def list_agent_turn_judgments(
+        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 500,
+        after: tuple[str, str] | None = None,
+    ) -> tuple[list[AgentTurnJudgment], tuple[str, str] | None]:
+        return self._read(
+            self._inner.list_agent_turn_judgments, tenant_id, evaluator_fingerprint,
+            limit=limit, after=after,
         )
 
     def list_agent_turn_evaluator_identities(

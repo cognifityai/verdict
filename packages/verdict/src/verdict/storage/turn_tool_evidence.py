@@ -1,10 +1,19 @@
-"""Bounded, content-free tool metadata reads for Agent Turn evaluation."""
+"""Bounded reads of the extra evidence an Agent Turn judge may see.
+
+Tool evidence is content-free metadata. Next-message evidence is the next
+Turn's request, which capture already redacted and bounded.
+"""
 
 from __future__ import annotations
 
 from verdict.agent_judgment import (
     MAX_TOOL_EVIDENCE_EVENTS,
+    NEXT_MESSAGE_MODE,
+    TOOL_EVIDENCE_MODE,
+    NextUserMessage,
+    TurnEvidence,
     TurnToolCounts,
+    paired_next_message,
     tool_counts_from_rows,
 )
 
@@ -140,3 +149,119 @@ def read_turn_tool_counts_batch(
             (event_type, status, None if is_error is None else bool(is_error), tool_origin)
         )
     return {key: tool_counts_from_rows(rows) for key, rows in rows_by_turn.items()}
+
+
+def _next_turn_joins(postgres: bool) -> str:
+    # Mirrors ``next_user_messages``: ``n`` is the lowest later sequence in the
+    # same run, so a sequence gap cannot pair a Turn with an unrelated request.
+    # Only when there is none, ``m`` is the first Turn of the session's next
+    # top-level run that has a Turn. Sub-agent runs never pair. Run IDs break
+    # start-time ties in byte order, as in Python and SQLite, whatever the
+    # Postgres database collation; the row-value comparison lets the session
+    # index seek to the next run instead of scanning the session. Whether the
+    # request came after the reply ended is decided in ``paired_next_message``.
+    run_id = 'run_id COLLATE "C"' if postgres else "run_id"
+    return (
+        "JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id "
+        "LEFT JOIN agent_turns n ON n.tenant_id=t.tenant_id AND n.run_id=t.run_id "
+        "AND n.sequence=(SELECT MIN(x.sequence) FROM agent_turns x "
+        "WHERE x.tenant_id=t.tenant_id AND x.run_id=t.run_id AND x.sequence>t.sequence) "
+        "LEFT JOIN agent_turns m ON n.turn_id IS NULL AND r.parent_run_id IS NULL "
+        "AND r.session_id IS NOT NULL AND m.tenant_id=t.tenant_id "
+        "AND m.run_id=(SELECT nr.run_id FROM agent_runs nr "
+        "WHERE nr.tenant_id=r.tenant_id AND nr.session_id=r.session_id "
+        "AND nr.parent_run_id IS NULL "
+        f"AND (nr.started_at,nr.{run_id})>(r.started_at,r.{run_id}) "
+        "AND EXISTS (SELECT 1 FROM agent_turns y "
+        "WHERE y.tenant_id=nr.tenant_id AND y.run_id=nr.run_id) "
+        f"ORDER BY nr.started_at,nr.{run_id} LIMIT 1) "
+        "AND m.sequence=(SELECT MIN(z.sequence) FROM agent_turns z "
+        "WHERE z.tenant_id=m.tenant_id AND z.run_id=m.run_id)"
+    )
+
+
+def _next_message(text, state, truncated, reply_ended_at, next_started_at) -> NextUserMessage:
+    if state is None:
+        return NextUserMessage()
+    return paired_next_message(text, state, truncated, reply_ended_at=reply_ended_at,
+                               next_started_at=next_started_at)
+
+
+def read_next_user_messages_batch(
+    cursor, *, postgres: bool, tenant_id: str,
+    turn_keys: list[tuple[str, str]],
+    session: bool = False,
+) -> dict[tuple[str, str], NextUserMessage]:
+    """One statement returning the user's next request for each Turn."""
+    if not turn_keys:
+        return {}
+    if len(turn_keys) > 100 or len(set(turn_keys)) != len(turn_keys):
+        raise ValueError("invalid bounded Turn evidence page")
+    placeholder = "%s" if postgres and not session else "?"
+    wanted = ",".join(f"({placeholder},{placeholder})" for _ in turn_keys)
+    columns = ("run_id", "turn_id", "parent_run_id", "t_ended", "n_id", "n_text", "n_state",
+               "n_truncated", "n_started", "m_text", "m_state", "m_truncated", "m_started")
+    result = cursor.execute(
+        f"WITH wanted(run_id,turn_id) AS (VALUES {wanted}) "
+        "SELECT w.run_id,w.turn_id,r.parent_run_id,t.ended_at AS t_ended,n.turn_id AS n_id,"
+        "n.user_request_redacted AS n_text,n.request_state AS n_state,"
+        "n.request_truncated AS n_truncated,n.started_at AS n_started,"
+        "m.user_request_redacted AS m_text,m.request_state AS m_state,"
+        "m.request_truncated AS m_truncated,m.started_at AS m_started "
+        f"FROM wanted w JOIN agent_turns t ON t.tenant_id={placeholder} "
+        "AND t.run_id=w.run_id AND t.turn_id=w.turn_id " + _next_turn_joins(postgres),
+        (*(value for key in turn_keys for value in key), tenant_id),
+    )
+    messages = {key: NextUserMessage() for key in turn_keys}
+    for row in result:
+        values = dict(zip(columns, (
+            tuple(row[key] for key in columns) if hasattr(row, "keys") else row
+        ), strict=True))
+        key = (values["run_id"], values["turn_id"])
+        if values["parent_run_id"] is not None:
+            messages[key] = NextUserMessage(sub_agent=True)
+        elif values["n_id"] is not None:
+            messages[key] = _next_message(
+                values["n_text"], values["n_state"], values["n_truncated"],
+                values["t_ended"], values["n_started"],
+            )
+        else:
+            messages[key] = _next_message(
+                values["m_text"], values["m_state"], values["m_truncated"],
+                values["t_ended"], values["m_started"],
+            )
+    return messages
+
+
+def read_turn_evidence(cursor, mode: str | None, *, postgres: bool, tenant_id: str,
+                       run_id: str, turn_id: str) -> TurnEvidence | None:
+    if mode is None:
+        return None
+    if mode == TOOL_EVIDENCE_MODE:
+        return read_turn_tool_counts(
+            cursor, postgres=postgres, tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
+        )
+    if mode == NEXT_MESSAGE_MODE:
+        return read_next_user_messages_batch(
+            cursor, postgres=postgres, tenant_id=tenant_id, turn_keys=[(run_id, turn_id)],
+        )[(run_id, turn_id)]
+    raise ValueError("unsupported Turn evidence mode")
+
+
+def read_turn_evidence_batch(
+    cursor, mode: str | None, *, postgres: bool, tenant_id: str,
+    turn_keys: list[tuple[str, str]], session: bool = False,
+) -> dict[tuple[str, str], TurnEvidence]:
+    if mode is None:
+        return {}
+    if mode == TOOL_EVIDENCE_MODE:
+        return read_turn_tool_counts_batch(
+            cursor, postgres=postgres, tenant_id=tenant_id, turn_keys=turn_keys,
+            session=session,
+        )
+    if mode == NEXT_MESSAGE_MODE:
+        return read_next_user_messages_batch(
+            cursor, postgres=postgres, tenant_id=tenant_id, turn_keys=turn_keys,
+            session=session,
+        )
+    raise ValueError("unsupported Turn evidence mode")
