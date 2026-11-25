@@ -6,6 +6,8 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0b8] - 2026-11-25
+
 ### Added
 
 - `verdict-reply-check` judges each agent reply by what the user wrote next:
@@ -18,8 +20,9 @@ the product is refined.
   After a run's last reply, the next request is the first one of the session's
   next top-level run, so applications that open one run per user message are
   covered. Sub-agent runs are excluded, because their requests come from
-  another agent, and so is any next request sent before the reply finished. Results are a separate evaluator identity; existing Turn and
-  tool-count results keep their identity and stay current. The logical-session
+  another agent, and so is any next request sent before the reply finished.
+  Results are a separate evaluator identity; existing Turn and tool-count
+  results keep their identity and stay current. The logical-session
   Monitor leaves replies with no possible next message out of the session
   roll-up instead of counting them as missing, and a session with no such reply
   at all is outside that judge metric's coverage. Every judge attempt is counted
